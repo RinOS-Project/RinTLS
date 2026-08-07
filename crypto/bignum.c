@@ -211,7 +211,16 @@ int bn_lshift(bignum_t* r, const bignum_t* a, rin_size_t bits)
     rin_size_t limb_shift = bits / 32;
     rin_size_t bit_shift = bits % 32;
 
-    if (a->used + limb_shift + 1 > BIGNUM_MAX_LIMBS) {
+    /* A whole-limb shift does not need a carry limb.  The previous
+     * unconditional +1 rejected the exact-width 4096-bit intermediates used
+     * by RSA-2048 reduction.  bn_div ignored that error and compared an
+     * uninitialized shifted value, making valid signatures key-dependent. */
+    rin_size_t carry_limbs = 0;
+    if (bit_shift != 0 &&
+        (a->limbs[a->used - 1] >> (32 - bit_shift)) != 0) {
+        carry_limbs = 1;
+    }
+    if (a->used + limb_shift + carry_limbs > BIGNUM_MAX_LIMBS) {
         return BIGNUM_ERR_OVERFLOW;
     }
 
@@ -455,7 +464,10 @@ int bn_div(bignum_t* q, bignum_t* rem, const bignum_t* a, const bignum_t* b)
     /* ビットごとに処理 */
     for (rin_size_t i = a_bits - b_bits + 1; i > 0; i--) {
         bignum_t shifted_b;
-        bn_lshift(&shifted_b, b, i - 1);
+        int shift_result = bn_lshift(&shifted_b, b, i - 1);
+        if (shift_result != BIGNUM_OK) {
+            return shift_result;
+        }
         shifted_b.sign = 0;
 
         if (bn_cmp_abs(&remainder, &shifted_b) >= 0) {

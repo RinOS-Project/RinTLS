@@ -455,13 +455,19 @@ int x509_parse_cert(x509_cert_t* cert, const u8* der, rin_size_t len)
 
     /* version [0] EXPLICIT INTEGER DEFAULT v1 */
     if (*p == ASN1_CONTEXT_0) {
-        p++;
-        if (asn1_read_tag(&p, tbs_end, &tag, &slen) < 0) return X509_ERR_PARSE;
-        if (asn1_read_tag(&p, p + slen, &tag, &slen) < 0) return X509_ERR_PARSE;
-        if (tag == ASN1_INTEGER && slen == 1) {
-            cert->version = *p + 1;
+        const u8* version_end;
+        if (asn1_read_tag(&p, tbs_end, &tag, &slen) < 0 ||
+            tag != ASN1_CONTEXT_0 || slen == 0) {
+            return X509_ERR_PARSE;
         }
-        p += slen;
+        version_end = p + slen;
+        if (version_end > tbs_end ||
+            asn1_read_tag(&p, version_end, &tag, &slen) < 0 ||
+            tag != ASN1_INTEGER || slen != 1 || p + slen != version_end) {
+            return X509_ERR_PARSE;
+        }
+        cert->version = *p + 1;
+        p = version_end;
     } else {
         cert->version = 1;
     }
@@ -499,9 +505,16 @@ int x509_parse_cert(x509_cert_t* cert, const u8* der, rin_size_t len)
 
     /* extensions [3] EXPLICIT Extensions OPTIONAL */
     if (p < tbs_end && *p == ASN1_CONTEXT_3) {
-        p++;
-        if (asn1_read_tag(&p, tbs_end, &tag, &slen) == 0) {
-            parse_extensions(cert, &p, p + slen);
+        const u8* extensions_end;
+        if (asn1_read_tag(&p, tbs_end, &tag, &slen) < 0 ||
+            tag != ASN1_CONTEXT_3) {
+            return X509_ERR_PARSE;
+        }
+        extensions_end = p + slen;
+        if (extensions_end > tbs_end ||
+            parse_extensions(cert, &p, extensions_end) != X509_OK ||
+            p != extensions_end) {
+            return X509_ERR_PARSE;
         }
     }
 
@@ -634,9 +647,9 @@ int x509_check_validity(const x509_cert_t* cert)
     x509_get_current_time(&now);
 
     if (now.year == 0) {
-        /* 信頼できる時刻源がない環境 (カーネルに実時計未配線など):
-         * 誤って常に期限切れと判定してしまうのを避けるためスキップする */
-        return X509_OK;
+        /* Certificate validity cannot be established without trusted wall
+         * clock input.  Security-sensitive callers must fail closed. */
+        return X509_ERR_EXPIRED;
     }
 
     if (x509_time_cmp(&now, &cert->not_before) < 0) {

@@ -195,6 +195,15 @@ void tls_handshake_set_server_name(tls_handshake_ctx_t* ctx, const char* name)
     ctx->server_name[len] = '\0';
 }
 
+void tls_handshake_set_trust_anchor_verifier(tls_handshake_ctx_t* ctx,
+                                             tls_trust_anchor_verify_func verify,
+                                             void* opaque)
+{
+    if (!ctx) return;
+    ctx->trust_anchor_verify = verify;
+    ctx->trust_anchor_opaque = opaque;
+}
+
 /* ═══════════════════════════════════════
  * Transcript Hash
  * ═══════════════════════════════════════ */
@@ -1396,12 +1405,11 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
         cert_index++;
     }
 
-    if (chain_err == TLS_HS_ERR_OK && !ctx->verify_none && cert_index > 1 &&
-        x509_is_self_signed(prev)) {
-        /* チェーン末尾が自己署名なら、その自己署名自体の正当性も確認 */
-        if (x509_verify_signature(prev, prev) != X509_OK) {
-            rintls_debug("[TLS] Root certificate self-signature is invalid\n");
-            chain_err = TLS_HS_ERR_CERTIFICATE;
+    if (chain_err == TLS_HS_ERR_OK && !ctx->verify_none) {
+        if (!prev || !ctx->trust_anchor_verify ||
+            ctx->trust_anchor_verify(ctx->trust_anchor_opaque, prev) != 1) {
+            rintls_debug("[TLS] Certificate chain has no trusted Rin anchor\n");
+            chain_err = TLS_HS_ERR_VERIFY;
         }
     }
 
@@ -1410,10 +1418,6 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
         ctx->state = TLS_STATE_ERROR;
         return chain_err;
     }
-
-    /* 注意: ルートCAストアが未実装のため、提示されたチェーン内部の署名整合性
-     * (leafがintermediateの鍵で署名されている等)とホスト名/有効期限のみを
-     * 検証する。真のルート信頼検証(x509_verify_with_root_ca)は未実装。 */
 
     ctx->state = TLS_STATE_CERTIFICATE_RECEIVED;
     return TLS_HS_ERR_OK;

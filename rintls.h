@@ -42,7 +42,7 @@ extern "C" {
  * オプションフラグ
  * ═══════════════════════════════════════ */
 
-#define RINTLS_OPT_VERIFY_NONE          0x0001  /* 証明書検証をスキップ (危険) */
+#define RINTLS_OPT_VERIFY_NONE          0x0001  /* 開発専用。通常ビルドでは拒否 */
 #define RINTLS_OPT_TLS_1_2_ONLY         0x0002  /* TLS 1.2のみ */
 #define RINTLS_OPT_TLS_1_3_ONLY         0x0004  /* TLS 1.3のみ */
 
@@ -115,6 +115,20 @@ int rintls_set_io(rintls_ctx* ctx,
  * options: RINTLS_OPT_* フラグの組み合わせ
  */
 int rintls_set_options(rintls_ctx* ctx, u32 options);
+
+/* Add one DER-encoded CA certificate to this context's trust store. */
+int rintls_add_trust_anchor_der(rintls_ctx* ctx,
+                                const void* certificate_der,
+                                rin_size_t certificate_len);
+
+/* Load a Rin CA bundle: "RCA1", little-endian entry count, followed by
+ * repeated little-endian DER length + DER certificate records. */
+int rintls_load_trust_store(rintls_ctx* ctx,
+                            const void* bundle,
+                            rin_size_t bundle_len);
+
+void rintls_clear_trust_anchors(rintls_ctx* ctx);
+u32 rintls_trust_anchor_count(rintls_ctx* ctx);
 
 /* ═══════════════════════════════════════
  * 接続

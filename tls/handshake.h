@@ -10,6 +10,7 @@
 #include "../crypto/sha256.h"
 #include "../crypto/ecdh.h"
 #include "../crypto/rsa.h"
+#include "../x509/cert.h"
 #include "record.h"
 
 /* ═══════════════════════════════════════
@@ -124,6 +125,9 @@ typedef enum {
 
 #define TLS_MAX_PENDING_HANDSHAKE_SEND  4096
 
+typedef int (*tls_trust_anchor_verify_func)(void* opaque,
+                                            const x509_cert_t* chain_top);
+
 typedef struct {
     /* 状態 */
     tls_state_t state;
@@ -131,6 +135,12 @@ typedef struct {
 
     /* RINTLS_OPT_VERIFY_NONE: 証明書チェーン/署名検証をスキップ */
     int verify_none;
+
+    /* The TLS parser verifies links inside the peer-provided chain.  This
+     * callback must additionally terminate that chain at a locally trusted
+     * anchor.  A missing callback is a verification failure. */
+    tls_trust_anchor_verify_func trust_anchor_verify;
+    void* trust_anchor_opaque;
 
     /* ネゴシエートされた値 */
     u16 version;
@@ -210,6 +220,10 @@ void tls_handshake_clear(tls_handshake_ctx_t* ctx);
 
 /* サーバー名を設定 (SNI) */
 void tls_handshake_set_server_name(tls_handshake_ctx_t* ctx, const char* name);
+
+void tls_handshake_set_trust_anchor_verifier(tls_handshake_ctx_t* ctx,
+                                             tls_trust_anchor_verify_func verify,
+                                             void* opaque);
 
 /* ═══════════════════════════════════════
  * ハンドシェイク実行
