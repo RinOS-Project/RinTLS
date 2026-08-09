@@ -103,7 +103,13 @@ typedef struct {
     x509_time_t not_after;
 
     /* Subject Alternative Name (SAN) */
+    /* `san` keeps the first DNS name for diagnostics/backward compatibility.
+     * `san_names_data` points at the complete GeneralNames contents in raw_data
+     * so hostname verification can inspect every dNSName without a fixed-size
+     * copied-name table. */
     char san[X509_MAX_SAN_SIZE];
+    const u8* san_names_data;
+    rin_size_t san_names_len;
 
     /* 公開鍵 */
     int key_type;

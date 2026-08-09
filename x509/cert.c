@@ -431,6 +431,8 @@ static int parse_extensions(x509_cert_t* cert, const u8** p, const u8* end)
             const u8* san_p = value_data;
             if (asn1_read_tag(&san_p, value_data + value_len, &tag, &len) == 0 && tag == ASN1_SEQUENCE) {
                 const u8* san_end = san_p + len;
+                cert->san_names_data = san_p;
+                cert->san_names_len = len;
                 while (san_p < san_end) {
                     if (asn1_read_tag(&san_p, san_end, &tag, &len) < 0) break;
                     /* dNSName [2] */
@@ -705,51 +707,88 @@ int x509_check_validity(const x509_cert_t* cert)
     return X509_OK;
 }
 
-int x509_check_hostname(const x509_cert_t* cert, const char* hostname)
+static char x509_ascii_lower(char c)
 {
-    /* SANを最初にチェック */
-    if (cert->san[0]) {
-        const char* san = cert->san;
-        const char* host = hostname;
+    if (c >= 'A' && c <= 'Z') return (char)(c + ('a' - 'A'));
+    return c;
+}
 
-        /* ワイルドカード対応 */
-        if (san[0] == '*' && san[1] == '.') {
-            san += 2;
-            /* ホスト名の最初のドットまでスキップ */
-            while (*host && *host != '.') host++;
-            if (*host == '.') host++;
-        }
+static int x509_dns_name_matches(const u8* pattern, rin_size_t pattern_len,
+                                 const char* hostname)
+{
+    rin_size_t host_len = 0;
+    rin_size_t pattern_offset = 0;
+    rin_size_t host_offset = 0;
 
-        /* 大文字小文字無視で比較 */
-        while (*san && *host) {
-            char c1 = *san++;
-            char c2 = *host++;
-            if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
-            if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
-            if (c1 != c2) return X509_ERR_NAME;
-        }
-        if (*san == '\0' && *host == '\0') return X509_OK;
+    if (!pattern || !hostname || pattern_len == 0) return 0;
+    while (hostname[host_len]) host_len++;
+    if (host_len == 0) return 0;
+
+    /* RFC 6125 wildcard form: a complete left-most label only. It must match
+     * exactly one non-empty hostname label, never the bare suffix or multiple
+     * labels. */
+    if (pattern_len >= 3 && pattern[0] == '*' && pattern[1] == '.') {
+        while (host_offset < host_len && hostname[host_offset] != '.')
+            host_offset++;
+        if (host_offset == 0 || host_offset >= host_len)
+            return 0;
+        host_offset++;
+        pattern_offset = 2;
     }
 
-    /* CNをチェック */
+    if (pattern_len - pattern_offset != host_len - host_offset)
+        return 0;
+
+    while (pattern_offset < pattern_len) {
+        char expected = (char)pattern[pattern_offset++];
+        char actual = hostname[host_offset++];
+        if (expected == '\0' || expected == '*' ||
+            x509_ascii_lower(expected) != x509_ascii_lower(actual)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int x509_check_hostname(const x509_cert_t* cert, const char* hostname)
+{
+    int saw_dns_san = 0;
+
+    /* A SAN extension can contain many names. Keep the DER-backed GeneralNames
+     * sequence and inspect all dNSName entries; modern public certificates
+     * commonly place the requested host after unrelated names. */
+    if (cert->san_names_data && cert->san_names_len > 0) {
+        const u8* san_p = cert->san_names_data;
+        const u8* san_end = san_p + cert->san_names_len;
+        while (san_p < san_end) {
+            u8 tag;
+            rin_size_t len;
+            if (asn1_read_tag(&san_p, san_end, &tag, &len) < 0)
+                return X509_ERR_NAME;
+            if (tag == 0x82) {
+                saw_dns_san = 1;
+                if (x509_dns_name_matches(san_p, len, hostname))
+                    return X509_OK;
+            }
+            san_p += len;
+        }
+        if (saw_dns_san)
+            return X509_ERR_NAME;
+    } else if (cert->san[0]) {
+        /* Compatibility for callers that construct x509_cert_t manually. */
+        rin_size_t san_len = 0;
+        while (cert->san[san_len]) san_len++;
+        if (x509_dns_name_matches((const u8*)cert->san, san_len, hostname))
+            return X509_OK;
+        return X509_ERR_NAME;
+    }
+
+    /* CN fallback is permitted only when no dNSName SAN exists. */
     if (cert->subject_cn[0]) {
-        const char* cn = cert->subject_cn;
-        const char* host = hostname;
-
-        if (cn[0] == '*' && cn[1] == '.') {
-            cn += 2;
-            while (*host && *host != '.') host++;
-            if (*host == '.') host++;
-        }
-
-        while (*cn && *host) {
-            char c1 = *cn++;
-            char c2 = *host++;
-            if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
-            if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
-            if (c1 != c2) return X509_ERR_NAME;
-        }
-        if (*cn == '\0' && *host == '\0') return X509_OK;
+        rin_size_t cn_len = 0;
+        while (cert->subject_cn[cn_len]) cn_len++;
+        if (x509_dns_name_matches((const u8*)cert->subject_cn, cn_len, hostname))
+            return X509_OK;
     }
 
     return X509_ERR_NAME;
