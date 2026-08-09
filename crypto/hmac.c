@@ -26,6 +26,7 @@ void hmac_sha256_init(hmac_sha256_ctx* ctx, const u8* key, rin_size_t key_len)
         u8 tmp[SHA256_DIGEST_SIZE];
         sha256(key, key_len, tmp);
         for (i = 0; i < SHA256_DIGEST_SIZE; i++) key_pad[i] = tmp[i];
+        rintls_secure_zero(tmp, sizeof(tmp));
     } else {
         for (i = 0; i < key_len; i++) key_pad[i] = key[i];
     }
@@ -49,6 +50,7 @@ void hmac_sha256_init(hmac_sha256_ctx* ctx, const u8* key, rin_size_t key_len)
         for (i = 0; i < SHA256_BLOCK_SIZE; i++) ipad_copy[i] = ipad[i];
         sha256_init(&ctx->inner);
         sha256_update(&ctx->inner, ipad_copy, SHA256_BLOCK_SIZE);
+        rintls_secure_zero(ipad_copy, sizeof(ipad_copy));
     }
 
     /* outer hashを初期化してopadを処理 - 非volatileコピーを使用 */
@@ -57,6 +59,7 @@ void hmac_sha256_init(hmac_sha256_ctx* ctx, const u8* key, rin_size_t key_len)
         for (i = 0; i < SHA256_BLOCK_SIZE; i++) opad_copy[i] = opad[i];
         sha256_init(&ctx->outer);
         sha256_update(&ctx->outer, opad_copy, SHA256_BLOCK_SIZE);
+        rintls_secure_zero(opad_copy, sizeof(opad_copy));
     }
 
     /* セキュリティのためパディングをクリア */
@@ -79,19 +82,12 @@ void hmac_sha256_final(hmac_sha256_ctx* ctx, u8* mac)
     /* inner hashを完了 */
     sha256_final(&ctx->inner, inner_hash);
 
-    rintls_debug("[HMAC_DBG] inner_hash: ");
-    for (int i = 0; i < 8; i++) {
-        rintls_debug_hex(inner_hash[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("...\n");
-
     /* outer hashにinner hashを追加して完了 */
     sha256_update(&ctx->outer, inner_hash, SHA256_DIGEST_SIZE);
     sha256_final(&ctx->outer, mac);
 
     /* クリーンアップ */
-    rintls_memset(inner_hash, 0, SHA256_DIGEST_SIZE);
+    rintls_secure_zero(inner_hash, sizeof(inner_hash));
 }
 
 void hmac_sha256(const u8* key, rin_size_t key_len,
@@ -100,33 +96,12 @@ void hmac_sha256(const u8* key, rin_size_t key_len,
 {
     hmac_sha256_ctx ctx;
 
-    rintls_debug("[HMAC_DBG] key: ");
-    for (rin_size_t i = 0; i < key_len && i < 8; i++) {
-        rintls_debug_hex(key[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("...\n");
-
-    rintls_debug("[HMAC_DBG] data: ");
-    for (rin_size_t i = 0; i < data_len && i < 8; i++) {
-        rintls_debug_hex(data[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("...\n");
-
     hmac_sha256_init(&ctx, key, key_len);
     hmac_sha256_update(&ctx, data, data_len);
     hmac_sha256_final(&ctx, mac);
 
-    rintls_debug("[HMAC_DBG] result: ");
-    for (int i = 0; i < 8; i++) {
-        rintls_debug_hex(mac[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("...\n");
-
     /* コンテキストをクリア */
-    rintls_memset(&ctx, 0, sizeof(ctx));
+    rintls_secure_zero(&ctx, sizeof(ctx));
 }
 
 /* ═══════════════════════════════════════
@@ -207,7 +182,7 @@ void hmac_sha384(const u8* key, rin_size_t key_len,
     hmac_sha384_final(&ctx, mac);
 
     /* コンテキストをクリア */
-    rintls_memset(&ctx, 0, sizeof(ctx));
+    rintls_secure_zero(&ctx, sizeof(ctx));
 }
 
 /* ═══════════════════════════════════════
@@ -230,6 +205,7 @@ void hkdf_sha256_extract(const u8* salt, rin_size_t salt_len,
     }
 
     hmac_sha256(salt, salt_len, ikm, ikm_len, prk);
+    rintls_secure_zero(default_salt, sizeof(default_salt));
 }
 
 /*
@@ -265,6 +241,7 @@ void hkdf_sha256_expand(const u8* prk,
             u8 t_copy[HMAC_SHA256_SIZE];
             for (int i = 0; i < HMAC_SHA256_SIZE; i++) t_copy[i] = t[i];
             hmac_sha256_update(&ctx, t_copy, t_len);
+            rintls_secure_zero(t_copy, sizeof(t_copy));
         }
 
         /* info を追加 */
@@ -280,6 +257,7 @@ void hkdf_sha256_expand(const u8* prk,
         u8 t_result[HMAC_SHA256_SIZE];
         hmac_sha256_final(&ctx, t_result);
         for (int i = 0; i < HMAC_SHA256_SIZE; i++) t[i] = t_result[i];
+        rintls_secure_zero(t_result, sizeof(t_result));
         t_len = HMAC_SHA256_SIZE;
 
         /* OKM にコピー */
@@ -293,7 +271,7 @@ void hkdf_sha256_expand(const u8* prk,
         pos += copy_len;
 
         /* コンテキストをクリア */
-        rintls_memset(&ctx, 0, sizeof(ctx));
+        rintls_secure_zero(&ctx, sizeof(ctx));
     }
 
     /* クリーンアップ */
@@ -314,7 +292,7 @@ void hkdf_sha256(const u8* salt, rin_size_t salt_len,
     hkdf_sha256_expand(prk, info, info_len, okm, okm_len);
 
     /* クリーンアップ */
-    rintls_memset(prk, 0, HMAC_SHA256_SIZE);
+    rintls_secure_zero(prk, sizeof(prk));
 }
 
 /* ═══════════════════════════════════════

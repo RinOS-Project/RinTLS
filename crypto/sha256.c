@@ -172,30 +172,8 @@ void sha256_final(sha256_ctx* ctx, u8* digest) {
 void sha256(const u8* data, rin_size_t len, u8* digest) {
     sha256_ctx ctx;
     sha256_init(&ctx);
-
-    /* Debug: check initial state */
-    u32 data_addr = (u32)(unsigned long)data;
-    rintls_debug("[SHA256] init state[0]=");
-    rintls_debug_hex(ctx.state[0]);
-    rintls_debug(" data=");
-    rintls_debug_hex(data_addr);
-    rintls_debug(" len=");
-    rintls_debug_hex((u32)len);
-    rintls_debug("\n");
-
     sha256_update(&ctx, data, len);
     sha256_final(&ctx, digest);
-
-    /* Debug: check output */
-    rintls_debug("[SHA256] digest[0-3]=");
-    rintls_debug_hex(digest[0]);
-    rintls_debug(" ");
-    rintls_debug_hex(digest[1]);
-    rintls_debug(" ");
-    rintls_debug_hex(digest[2]);
-    rintls_debug(" ");
-    rintls_debug_hex(digest[3]);
-    rintls_debug("\n");
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
