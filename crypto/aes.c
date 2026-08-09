@@ -679,7 +679,12 @@ int aes_gcm_decrypt(
     u8* plaintext, rin_size_t* pt_len
 ) {
     aes_gcm_ctx gcm;
-    (void)tag_len;
+    if (pt_len) *pt_len = 0;
+    if (!ctx || !nonce || nonce_len == 0 || !tag || tag_len != 16 ||
+        !plaintext || !pt_len || (aad_len != 0 && !aad) ||
+        (ct_len != 0 && !ciphertext)) {
+        return -1;
+    }
 
     rintls_memset(&gcm, 0, sizeof(gcm));
     rintls_memcpy(&gcm.aes, ctx, sizeof(aes_ctx));
@@ -687,16 +692,6 @@ int aes_gcm_decrypt(
     /* Compute hash subkey H */
     u8 zero[16] = {0};
     aes_encrypt_block(&gcm.aes, zero, gcm.h);
-
-    rintls_debug("[GCM] H[0-3]: ");
-    rintls_debug_hex(gcm.h[0]);
-    rintls_debug(" ");
-    rintls_debug_hex(gcm.h[1]);
-    rintls_debug(" ");
-    rintls_debug_hex(gcm.h[2]);
-    rintls_debug(" ");
-    rintls_debug_hex(gcm.h[3]);
-    rintls_debug("\n");
 
     /* Set IV */
     if (nonce_len == 12) {
@@ -731,18 +726,8 @@ int aes_gcm_decrypt(
         ghash_update(&gcm, aad, aad_len);
     }
 
-    rintls_debug("[GCM] after AAD ghash[0-3]: ");
-    rintls_debug_hex(gcm.ghash[0]);
-    rintls_debug(" ");
-    rintls_debug_hex(gcm.ghash[1]);
-    rintls_debug(" ");
-    rintls_debug_hex(gcm.ghash[2]);
-    rintls_debug(" ");
-    rintls_debug_hex(gcm.ghash[3]);
-    rintls_debug("\n");
-
     /* Decrypt and compute GHASH */
-    rintls_memcpy(plaintext, ciphertext, ct_len);
+    if (ct_len != 0) rintls_memcpy(plaintext, ciphertext, ct_len);
     gcm.ct_len = ct_len * 8;
 
     u8 keystream[16];
@@ -765,29 +750,7 @@ int aes_gcm_decrypt(
     if (len > 0) {
         for (rin_size_t i = 0; i < len; i++) gcm.ghash[i] ^= ct_ptr[i];
 
-        /* Debug: dump full ghash BEFORE gcm_mult */
-        rintls_debug("[GCM_DEBUG] before gcm_mult ghash: ");
-        for (int dbg = 0; dbg < 16; dbg++) {
-            rintls_debug_hex(gcm.ghash[dbg]);
-            rintls_debug(" ");
-        }
-        rintls_debug("\n");
-        rintls_debug("[GCM_DEBUG] H: ");
-        for (int dbg = 0; dbg < 16; dbg++) {
-            rintls_debug_hex(gcm.h[dbg]);
-            rintls_debug(" ");
-        }
-        rintls_debug("\n");
-
         gcm_mult(gcm.ghash, gcm.h);
-
-        /* Debug: dump full ghash AFTER gcm_mult */
-        rintls_debug("[GCM_DEBUG] after gcm_mult ghash: ");
-        for (int dbg = 0; dbg < 16; dbg++) {
-            rintls_debug_hex(gcm.ghash[dbg]);
-            rintls_debug(" ");
-        }
-        rintls_debug("\n");
 
         aes_encrypt_block(&gcm.aes, gcm.counter, keystream);
         gcm_inc_counter(gcm.counter);
@@ -795,16 +758,6 @@ int aes_gcm_decrypt(
     }
 
     *pt_len = ct_len;
-
-    rintls_debug("[GCM] after CT ghash[0-3]: ");
-    rintls_debug_hex(gcm.ghash[0]);
-    rintls_debug(" ");
-    rintls_debug_hex(gcm.ghash[1]);
-    rintls_debug(" ");
-    rintls_debug_hex(gcm.ghash[2]);
-    rintls_debug(" ");
-    rintls_debug_hex(gcm.ghash[3]);
-    rintls_debug("\n");
 
     /* Compute expected tag */
     /* NOTE: No additional padding needed here - short blocks are already
@@ -814,86 +767,25 @@ int aes_gcm_decrypt(
     rintls_write_be64(len_block, gcm.aad_len);
     rintls_write_be64(len_block + 8, gcm.ct_len);
 
-    rintls_debug("[GCM] len_block: aad_len=");
-    rintls_debug_hex((u32)gcm.aad_len);
-    rintls_debug(" ct_len=");
-    rintls_debug_hex((u32)gcm.ct_len);
-    rintls_debug("\n");
-
     ghash_update(&gcm, len_block, 16);
-
-    rintls_debug("[GCM] after len ghash[0-3]: ");
-    rintls_debug_hex(gcm.ghash[0]);
-    rintls_debug(" ");
-    rintls_debug_hex(gcm.ghash[1]);
-    rintls_debug(" ");
-    rintls_debug_hex(gcm.ghash[2]);
-    rintls_debug(" ");
-    rintls_debug_hex(gcm.ghash[3]);
-    rintls_debug("\n");
 
     u8 s[16];
     aes_encrypt_block(&gcm.aes, gcm.j0, s);
 
-    rintls_debug("[GCM] J0[0-3]: ");
-    rintls_debug_hex(gcm.j0[0]);
-    rintls_debug(" ");
-    rintls_debug_hex(gcm.j0[1]);
-    rintls_debug(" ");
-    rintls_debug_hex(gcm.j0[2]);
-    rintls_debug(" ");
-    rintls_debug_hex(gcm.j0[3]);
-    rintls_debug("\n");
-    rintls_debug("[GCM] E(K,J0)[0-3]: ");
-    rintls_debug_hex(s[0]);
-    rintls_debug(" ");
-    rintls_debug_hex(s[1]);
-    rintls_debug(" ");
-    rintls_debug_hex(s[2]);
-    rintls_debug(" ");
-    rintls_debug_hex(s[3]);
-    rintls_debug("\n");
-
     u8 computed_tag[16];
     for (int i = 0; i < 16; i++) computed_tag[i] = gcm.ghash[i] ^ s[i];
-
-    /* デバッグ: 計算タグ vs 受信タグ (完全な16バイト) */
-    rintls_debug("[GCM] computed_tag: ");
-    for (int i = 0; i < 16; i++) {
-        rintls_debug_hex(computed_tag[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("\n");
-    rintls_debug("[GCM] received_tag: ");
-    for (int i = 0; i < 16; i++) {
-        rintls_debug_hex(tag[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("\n");
 
     int result = rintls_secure_compare(computed_tag, tag, 16);
 
     if (result != 0) {
-        rintls_debug("[GCM] !!! TAG MISMATCH !!! ct_len=");
-        rintls_debug_hex((u32)ct_len);
-        rintls_debug(" aad_len=");
-        rintls_debug_hex((u32)gcm.aad_len);
-        rintls_debug("\n");
-        /* Compute ciphertext checksum for debugging */
-        u32 ct_sum = 0;
-        for (rin_size_t i = 0; i < ct_len; i++) ct_sum += ciphertext[i];
-        (void)ct_sum;
-        rintls_debug("[GCM] ct_checksum=");
-        rintls_debug_hex(ct_sum);
-        u32 tag_sum = 0;
-        for (int i = 0; i < 16; i++) tag_sum += tag[i];
-        (void)tag_sum;
-        rintls_debug(" tag_checksum=");
-        rintls_debug_hex(tag_sum);
-        rintls_debug("\n");
         rintls_memzero(plaintext, ct_len);
+        *pt_len = 0;
     }
 
+    rintls_memzero(keystream, sizeof(keystream));
+    rintls_memzero(len_block, sizeof(len_block));
+    rintls_memzero(s, sizeof(s));
+    rintls_memzero(computed_tag, sizeof(computed_tag));
     rintls_memzero(&gcm, sizeof(gcm));
     return result;
 }
