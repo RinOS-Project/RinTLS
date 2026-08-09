@@ -112,7 +112,6 @@ void sha256_init(sha256_ctx* ctx) {
 }
 
 void sha256_update(sha256_ctx* ctx, const u8* data, rin_size_t len) {
-    rin_size_t i;
     u32 index = (u32)((ctx->count >> 3) & 0x3F);
 
     ctx->count += (u64)len << 3;
