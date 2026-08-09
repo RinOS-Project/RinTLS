@@ -51,17 +51,6 @@ struct rintls_ctx {
 #define RINTLS_MAX_TRUST_ANCHORS 256u
 #define RINTLS_MAX_TRUST_BUNDLE_BYTES (4u * 1024u * 1024u)
 
-static int rintls_name_equal(const char* left, const char* right)
-{
-    rin_size_t i = 0;
-    if (!left || !right) return 0;
-    while (left[i] && right[i]) {
-        if (left[i] != right[i]) return 0;
-        i++;
-    }
-    return left[i] == '\0' && right[i] == '\0';
-}
-
 static int rintls_verify_chain_top(void* opaque, const x509_cert_t* chain_top)
 {
     rintls_ctx* ctx = (rintls_ctx*)opaque;
@@ -79,8 +68,11 @@ static int rintls_verify_chain_top(void* opaque, const x509_cert_t* chain_top)
             return 1;
         }
 
-        if (chain_top->issuer_cn[0] != '\0' && trusted->subject_cn[0] != '\0' &&
-            rintls_name_equal(chain_top->issuer_cn, trusted->subject_cn) &&
+        if (chain_top->issuer_name && trusted->subject_name &&
+            chain_top->issuer_name_len != 0 &&
+            chain_top->issuer_name_len == trusted->subject_name_len &&
+            rintls_memcmp(chain_top->issuer_name, trusted->subject_name,
+                          chain_top->issuer_name_len) == 0 &&
             x509_verify_signature(chain_top, trusted) == X509_OK) {
             return 1;
         }
@@ -419,6 +411,9 @@ int rintls_handshake_step(rintls_ctx* ctx)
         break;
     case TLS_HS_ERR_IO:
         ctx->last_error = RINTLS_ERR_IO;
+        break;
+    case TLS_HS_ERR_RANDOM:
+        ctx->last_error = RINTLS_ERR_RANDOM;
         break;
     case TLS_HS_ERR_VERSION:
         ctx->last_error = RINTLS_ERR_VERSION;

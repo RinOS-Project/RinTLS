@@ -26,6 +26,14 @@ const u8 RSA_DIGESTINFO_SHA384[] = {
 };
 const rin_size_t RSA_DIGESTINFO_SHA384_LEN = 19;
 
+/* SHA-512 DigestInfo */
+const u8 RSA_DIGESTINFO_SHA512[] = {
+    0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86,
+    0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05,
+    0x00, 0x04, 0x40
+};
+const rin_size_t RSA_DIGESTINFO_SHA512_LEN = 19;
+
 /* SHA-1 DigestInfo */
 const u8 RSA_DIGESTINFO_SHA1[] = {
     0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e,
@@ -227,6 +235,11 @@ int rsa_pkcs1_verify(const u8* signature, rin_size_t sig_len,
         digest_info = RSA_DIGESTINFO_SHA384;
         digest_info_len = RSA_DIGESTINFO_SHA384_LEN;
         if (hash_len != 48) return RSA_ERR_INVALID;
+        break;
+    case RSA_HASH_SHA512:
+        digest_info = RSA_DIGESTINFO_SHA512;
+        digest_info_len = RSA_DIGESTINFO_SHA512_LEN;
+        if (hash_len != 64) return RSA_ERR_INVALID;
         break;
     case RSA_HASH_SHA1:
         digest_info = RSA_DIGESTINFO_SHA1;
@@ -479,10 +492,16 @@ int rsa_pkcs1_encrypt(u8* output, rin_size_t* output_len,
     rin_size_t ps_len = key_bytes - 3 - input_len;
     for (rin_size_t i = 0; i < ps_len; i++) {
         u8 r;
+        u32 attempts = 0;
         do {
-            rintls_random_bytes(&r, 1);
+            if (attempts++ >= 128 || rintls_random_bytes(&r, 1) != 0) {
+                rintls_secure_zero(&r, sizeof(r));
+                rintls_secure_zero(em, sizeof(em));
+                return RSA_ERR_KEY;
+            }
         } while (r == 0);
         em[2 + i] = r;
+        rintls_secure_zero(&r, sizeof(r));
     }
 
     /* 区切りの0x00 */

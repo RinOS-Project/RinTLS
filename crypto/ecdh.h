@@ -17,6 +17,12 @@
 #define P256_POINT_SIZE     65      /* 非圧縮: 0x04 + x(32) + y(32) */
 #define P256_POINT_COMPRESSED_SIZE  33  /* 圧縮: 0x02/0x03 + x(32) */
 
+/* ECDSA public-key curves. Values match the TLS NamedGroup registry. */
+#define ECDSA_CURVE_P256    23
+#define ECDSA_CURVE_P384    24
+#define ECDSA_CURVE_P521    25
+#define ECDSA_MAX_POINT_SIZE 133
+
 /* X25519 */
 #define X25519_KEY_SIZE     32      /* 256ビット = 32バイト */
 #define X25519_POINT_SIZE   32      /* Montgomeryスカラー */
@@ -75,6 +81,12 @@ int p256_validate_public(const u8* public_key, rin_size_t len);
  * public_key: 公開鍵 (65バイト、非圧縮)
  */
 int ecdsa_p256_verify(const u8* signature, rin_size_t sig_len,
+                      const u8* hash, rin_size_t hash_len,
+                      const u8* public_key, rin_size_t pubkey_len);
+
+/* Verify an ECDSA signature using an uncompressed NIST P-256/P-384/P-521 key. */
+int ecdsa_nist_verify(int curve,
+                      const u8* signature, rin_size_t sig_len,
                       const u8* hash, rin_size_t hash_len,
                       const u8* public_key, rin_size_t pubkey_len);
 

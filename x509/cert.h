@@ -39,6 +39,8 @@
 #define X509_SIG_RSA_SHA512     3
 #define X509_SIG_ECDSA_SHA256   4
 #define X509_SIG_ECDSA_SHA384   5
+#define X509_SIG_RSA_SHA1       6  /* parseable only; verification is forbidden */
+#define X509_SIG_ECDSA_SHA512   7
 
 /* ═══════════════════════════════════════
  * ASN.1 タグ
@@ -88,9 +90,13 @@ typedef struct {
 
     /* 発行者 (Issuer) */
     char issuer_cn[X509_MAX_CN_SIZE];
+    const u8* issuer_name;
+    rin_size_t issuer_name_len;
 
     /* サブジェクト (Subject) */
     char subject_cn[X509_MAX_CN_SIZE];
+    const u8* subject_name;
+    rin_size_t subject_name_len;
 
     /* 有効期間 */
     x509_time_t not_before;
@@ -104,8 +110,9 @@ typedef struct {
     union {
         rsa_pubkey_t rsa;
         struct {
-            u8 point[65];
+            u8 point[ECDSA_MAX_POINT_SIZE];
             rin_size_t point_len;
+            int curve;
         } ecdsa;
     } pubkey;
 
@@ -140,7 +147,7 @@ void x509_cert_clear(x509_cert_t* cert);
  * 証明書検証
  * ═══════════════════════════════════════ */
 
-/* 証明書の署名を検証 (issuerの公開鍵で) */
+/* 証明書の署名を検証 (issuerの公開鍵で)。SHA-1は常にUNSUPPORTED。 */
 int x509_verify_signature(const x509_cert_t* cert, const x509_cert_t* issuer);
 
 /* 自己署名証明書かチェック */

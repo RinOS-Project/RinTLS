@@ -304,17 +304,13 @@ static int bn_add_abs(bignum_t* r, const bignum_t* a, const bignum_t* b)
     }
 
     u64 carry = 0;
-    for (rin_size_t i = 0; i < max_used || carry; i++) {
+    for (rin_size_t i = 0; i < max_used; i++) {
         u64 sum = carry;
         if (i < a->used) sum += a->limbs[i];
         if (i < b->used) sum += b->limbs[i];
 
         r->limbs[i] = (u32)sum;
         carry = sum >> 32;
-
-        if (i >= r->used && r->limbs[i] != 0) {
-            r->used = i + 1;
-        }
     }
 
     if (carry) {

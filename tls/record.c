@@ -538,32 +538,6 @@ static int tls13_decrypt_gcm(tls_cipher_ctx_t* cipher,
 
     rintls_debug("[TLS_DEC] seq_num=");
     rintls_debug_hex((u32)cipher->seq_num);
-    rintls_debug(" key[0-3]=");
-    rintls_debug_hex(cipher->key[0]);
-    rintls_debug(" ");
-    rintls_debug_hex(cipher->key[1]);
-    rintls_debug(" ");
-    rintls_debug_hex(cipher->key[2]);
-    rintls_debug(" ");
-    rintls_debug_hex(cipher->key[3]);
-    rintls_debug("\n");
-    rintls_debug("[TLS_DEC] full key: ");
-    for (int i = 0; i < 16; i++) {
-        rintls_debug_hex(cipher->key[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("\n");
-    rintls_debug("[TLS_DEC] full iv: ");
-    for (int i = 0; i < 12; i++) {
-        rintls_debug_hex(cipher->iv[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("\n");
-    rintls_debug("[TLS_DEC] full nonce: ");
-    for (int i = 0; i < 12; i++) {
-        rintls_debug_hex(nonce[i]);
-        rintls_debug(" ");
-    }
     rintls_debug("\n");
 
     rin_size_t ciphertext_len = input_len - 16;

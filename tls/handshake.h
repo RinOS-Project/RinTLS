@@ -93,6 +93,7 @@
 #define TLS_SIG_RSA_PKCS1_SHA512        0x0601
 #define TLS_SIG_ECDSA_SECP256R1_SHA256  0x0403
 #define TLS_SIG_ECDSA_SECP384R1_SHA384  0x0503
+#define TLS_SIG_ECDSA_SECP521R1_SHA512  0x0603
 #define TLS_SIG_RSA_PSS_RSAE_SHA256     0x0804
 #define TLS_SIG_RSA_PSS_RSAE_SHA384     0x0805
 #define TLS_SIG_RSA_PSS_RSAE_SHA512     0x0806
@@ -150,6 +151,7 @@ typedef struct {
     /* ランダム値 */
     u8 client_random[32];
     u8 server_random[32];
+    int entropy_ready;
 
     /* 鍵交換 */
     x25519_keypair_t x25519_keypair;
@@ -182,8 +184,9 @@ typedef struct {
     u8* server_cert;
     rin_size_t server_cert_len;
     rsa_pubkey_t server_rsa_key;
-    u8 server_ecdsa_key[65];
+    u8 server_ecdsa_key[ECDSA_MAX_POINT_SIZE];
     rin_size_t server_ecdsa_key_len;
+    int server_ecdsa_curve;
     int server_key_type;    /* 0=RSA, 1=ECDSA */
 
     /* SNI */
@@ -322,5 +325,6 @@ int tls_compute_verify_data(tls_handshake_ctx_t* ctx, int is_client, u8* verify_
 #define TLS_HS_ERR_ALERT            -9
 #define TLS_HS_ERR_WANT_READ        -10
 #define TLS_HS_ERR_WANT_WRITE       -11
+#define TLS_HS_ERR_RANDOM            -12
 
 #endif /* RINTLS_HANDSHAKE_H */

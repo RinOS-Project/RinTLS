@@ -455,13 +455,29 @@ int x25519_compute_public(u8* public_key, const u8* private_key)
 
 int x25519_keygen(x25519_keypair_t* keypair)
 {
+    u8 nonzero = 0;
+
+    if (!keypair) return ECDH_ERR_INVALID;
+
     /* ランダムな秘密鍵を生成 */
-    rintls_random_bytes(keypair->private_key, 32);
+    if (rintls_random_bytes(keypair->private_key, 32) != 0) {
+        rintls_secure_zero(keypair, sizeof(*keypair));
+        return ECDH_ERR_KEY;
+    }
+    for (rin_size_t i = 0; i < 32; ++i) nonzero |= keypair->private_key[i];
+    if (nonzero == 0) {
+        rintls_secure_zero(keypair, sizeof(*keypair));
+        return ECDH_ERR_KEY;
+    }
 
     /* RFC 7748: クランプは scalarmult 内で行う */
 
     /* 公開鍵を計算 */
-    return x25519_compute_public(keypair->public_key, keypair->private_key);
+    int result = x25519_compute_public(keypair->public_key, keypair->private_key);
+    if (result != ECDH_OK) {
+        rintls_secure_zero(keypair, sizeof(*keypair));
+    }
+    return result;
 }
 
 int x25519_ecdh(u8* shared_secret,
@@ -715,6 +731,9 @@ int p256_keygen(p256_keypair_t* keypair)
 {
     bignum_t k, n, prime;
     p256_point_t G, Q;
+    u32 attempts = 0;
+
+    if (!keypair) return ECDH_ERR_INVALID;
 
     p256_get_p(&prime);
     p256_get_n(&n);
@@ -726,7 +745,12 @@ int p256_keygen(p256_keypair_t* keypair)
 
     /* ランダムな秘密鍵 k (1 <= k < n) */
     do {
-        rintls_random_bytes(keypair->private_key, 32);
+        if (attempts++ >= 128 ||
+            rintls_random_bytes(keypair->private_key, 32) != 0) {
+            bn_clear(&k);
+            rintls_secure_zero(keypair, sizeof(*keypair));
+            return ECDH_ERR_KEY;
+        }
         bn_from_bytes(&k, keypair->private_key, 32);
     } while (bn_is_zero(&k) || bn_cmp(&k, &n) >= 0);
 
@@ -978,4 +1002,260 @@ int ecdsa_p256_verify(const u8* signature, rin_size_t sig_len,
     }
 
     return ECDH_OK;
+}
+
+/* P-384 and P-521 reuse the affine NIST-curve arithmetic above. All three
+ * supported curves use a = -3; only the field/order/base point differ. */
+static const u8 P384_P[] = {
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xfe,0xff,0xff,0xff,0xff,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff
+};
+static const u8 P384_N[] = {
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xc7,0x63,0x4d,0x81,0xf4,0x37,0x2d,0xdf,0x58,0x1a,0x0d,0xb2,
+    0x48,0xb0,0xa7,0x7a,0xec,0xec,0x19,0x6a,0xcc,0xc5,0x29,0x73
+};
+static const u8 P384_B[] = {
+    0xb3,0x31,0x2f,0xa7,0xe2,0x3e,0xe7,0xe4,0x98,0x8e,0x05,0x6b,
+    0xe3,0xf8,0x2d,0x19,0x18,0x1d,0x9c,0x6e,0xfe,0x81,0x41,0x12,
+    0x03,0x14,0x08,0x8f,0x50,0x13,0x87,0x5a,0xc6,0x56,0x39,0x8d,
+    0x8a,0x2e,0xd1,0x9d,0x2a,0x85,0xc8,0xed,0xd3,0xec,0x2a,0xef
+};
+static const u8 P384_GX[] = {
+    0xaa,0x87,0xca,0x22,0xbe,0x8b,0x05,0x37,0x8e,0xb1,0xc7,0x1e,
+    0xf3,0x20,0xad,0x74,0x6e,0x1d,0x3b,0x62,0x8b,0xa7,0x9b,0x98,
+    0x59,0xf7,0x41,0xe0,0x82,0x54,0x2a,0x38,0x55,0x02,0xf2,0x5d,
+    0xbf,0x55,0x29,0x6c,0x3a,0x54,0x5e,0x38,0x72,0x76,0x0a,0xb7
+};
+static const u8 P384_GY[] = {
+    0x36,0x17,0xde,0x4a,0x96,0x26,0x2c,0x6f,0x5d,0x9e,0x98,0xbf,
+    0x92,0x92,0xdc,0x29,0xf8,0xf4,0x1d,0xbd,0x28,0x9a,0x14,0x7c,
+    0xe9,0xda,0x31,0x13,0xb5,0xf0,0xb8,0xc0,0x0a,0x60,0xb1,0xce,
+    0x1d,0x7e,0x81,0x9d,0x7a,0x43,0x1d,0x7c,0x90,0xea,0x0e,0x5f
+};
+
+static const u8 P521_P[] = {
+    0x01,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff
+};
+static const u8 P521_N[] = {
+    0x01,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xfa,0x51,0x86,0x87,0x83,0xbf,0x2f,0x96,0x6b,0x7f,0xcc,
+    0x01,0x48,0xf7,0x09,0xa5,0xd0,0x3b,0xb5,0xc9,0xb8,0x89,
+    0x9c,0x47,0xae,0xbb,0x6f,0xb7,0x1e,0x91,0x38,0x64,0x09
+};
+static const u8 P521_B[] = {
+    0x51,0x95,0x3e,0xb9,0x61,0x8e,0x1c,0x9a,0x1f,0x92,0x9a,
+    0x21,0xa0,0xb6,0x85,0x40,0xee,0xa2,0xda,0x72,0x5b,0x99,
+    0xb3,0x15,0xf3,0xb8,0xb4,0x89,0x91,0x8e,0xf1,0x09,0xe1,
+    0x56,0x19,0x39,0x51,0xec,0x7e,0x93,0x7b,0x16,0x52,0xc0,
+    0xbd,0x3b,0xb1,0xbf,0x07,0x35,0x73,0xdf,0x88,0x3d,0x2c,
+    0x34,0xf1,0xef,0x45,0x1f,0xd4,0x6b,0x50,0x3f,0x00
+};
+static const u8 P521_GX[] = {
+    0x00,0xc6,0x85,0x8e,0x06,0xb7,0x04,0x04,0xe9,0xcd,0x9e,
+    0x3e,0xcb,0x66,0x23,0x95,0xb4,0x42,0x9c,0x64,0x81,0x39,
+    0x05,0x3f,0xb5,0x21,0xf8,0x28,0xaf,0x60,0x6b,0x4d,0x3d,
+    0xba,0xa1,0x4b,0x5e,0x77,0xef,0xe7,0x59,0x28,0xfe,0x1d,
+    0xc1,0x27,0xa2,0xff,0xa8,0xde,0x33,0x48,0xb3,0xc1,0x85,
+    0x6a,0x42,0x9b,0xf9,0x7e,0x7e,0x31,0xc2,0xe5,0xbd,0x66
+};
+static const u8 P521_GY[] = {
+    0x01,0x18,0x39,0x29,0x6a,0x78,0x9a,0x3b,0xc0,0x04,0x5c,
+    0x8a,0x5f,0xb4,0x2c,0x7d,0x1b,0xd9,0x98,0xf5,0x44,0x49,
+    0x57,0x9b,0x44,0x68,0x17,0xaf,0xbd,0x17,0x27,0x3e,0x66,
+    0x2c,0x97,0xee,0x72,0x99,0x5e,0xf4,0x26,0x40,0xc5,0x50,
+    0xb9,0x01,0x3f,0xad,0x07,0x61,0x35,0x3c,0x70,0x86,0xa2,
+    0x72,0xc2,0x40,0x88,0xbe,0x94,0x76,0x9f,0xd1,0x66,0x50
+};
+
+typedef struct {
+    rin_size_t coordinate_size;
+    const u8* p;
+    const u8* n;
+    const u8* b;
+    rin_size_t b_size;
+    const u8* gx;
+    const u8* gy;
+} nist_curve_t;
+
+static int nist_curve_parameters(int curve, nist_curve_t* parameters)
+{
+    if (!parameters) return ECDH_ERR_INVALID;
+    if (curve == ECDSA_CURVE_P384) {
+        parameters->coordinate_size = 48;
+        parameters->p = P384_P;
+        parameters->n = P384_N;
+        parameters->b = P384_B;
+        parameters->b_size = sizeof(P384_B);
+        parameters->gx = P384_GX;
+        parameters->gy = P384_GY;
+        return ECDH_OK;
+    }
+    if (curve == ECDSA_CURVE_P521) {
+        parameters->coordinate_size = 66;
+        parameters->p = P521_P;
+        parameters->n = P521_N;
+        parameters->b = P521_B;
+        parameters->b_size = sizeof(P521_B);
+        parameters->gx = P521_GX;
+        parameters->gy = P521_GY;
+        return ECDH_OK;
+    }
+    return ECDH_ERR_INVALID;
+}
+
+static int ecdsa_read_der_length(const u8** cursor, const u8* end,
+                                 rin_size_t* length)
+{
+    u8 first;
+    rin_size_t value = 0;
+    rin_size_t count;
+    if (!cursor || !*cursor || *cursor >= end || !length) return ECDH_ERR_INVALID;
+    first = *(*cursor)++;
+    if (first < 0x80) {
+        *length = first;
+        return ECDH_OK;
+    }
+    count = first & 0x7fu;
+    if (count == 0 || count > sizeof(rin_size_t) || (rin_size_t)(end - *cursor) < count)
+        return ECDH_ERR_INVALID;
+    if (**cursor == 0) return ECDH_ERR_INVALID;
+    while (count--) value = (value << 8) | *(*cursor)++;
+    if (value < 0x80 || value > (rin_size_t)(end - *cursor)) return ECDH_ERR_INVALID;
+    *length = value;
+    return ECDH_OK;
+}
+
+static int ecdsa_component_from_der(u8* output, rin_size_t width,
+                                    const u8** cursor, const u8* end)
+{
+    rin_size_t length;
+    const u8* value;
+    if (*cursor >= end || *(*cursor)++ != 0x02 ||
+        ecdsa_read_der_length(cursor, end, &length) != ECDH_OK ||
+        length == 0 || length > (rin_size_t)(end - *cursor)) {
+        return ECDH_ERR_INVALID;
+    }
+    value = *cursor;
+    *cursor += length;
+    if (value[0] & 0x80) return ECDH_ERR_INVALID;
+    if (length > 1 && value[0] == 0) {
+        if ((value[1] & 0x80) == 0) return ECDH_ERR_INVALID;
+        value++;
+        length--;
+    }
+    if (length > width) return ECDH_ERR_INVALID;
+    rintls_memset(output, 0, width);
+    rintls_memcpy(output + width - length, value, length);
+    return ECDH_OK;
+}
+
+static int ecdsa_signature_components(u8* r, u8* s, rin_size_t width,
+                                      const u8* signature, rin_size_t sig_len)
+{
+    const u8* cursor;
+    const u8* end;
+    rin_size_t sequence_length;
+    if (sig_len == width * 2) {
+        rintls_memcpy(r, signature, width);
+        rintls_memcpy(s, signature + width, width);
+        return ECDH_OK;
+    }
+    cursor = signature;
+    end = signature + sig_len;
+    if (cursor >= end || *cursor++ != 0x30 ||
+        ecdsa_read_der_length(&cursor, end, &sequence_length) != ECDH_OK ||
+        sequence_length != (rin_size_t)(end - cursor)) {
+        return ECDH_ERR_INVALID;
+    }
+    if (ecdsa_component_from_der(r, width, &cursor, end) != ECDH_OK ||
+        ecdsa_component_from_der(s, width, &cursor, end) != ECDH_OK || cursor != end) {
+        return ECDH_ERR_INVALID;
+    }
+    return ECDH_OK;
+}
+
+static int nist_public_point_is_valid(const p256_point_t* point,
+                                      const bignum_t* prime,
+                                      const u8* b_bytes, rin_size_t b_size)
+{
+    bignum_t lhs, rhs, temporary, three, b;
+    if (bn_cmp(&point->x, prime) >= 0 || bn_cmp(&point->y, prime) >= 0)
+        return 0;
+    bn_mod_mul(&lhs, &point->y, &point->y, prime);
+    bn_mod_mul(&temporary, &point->x, &point->x, prime);
+    bn_mod_mul(&rhs, &temporary, &point->x, prime);
+    bn_set_u32(&three, 3);
+    bn_mod_mul(&temporary, &three, &point->x, prime);
+    bn_mod_sub(&rhs, &rhs, &temporary, prime);
+    bn_from_bytes(&b, b_bytes, b_size);
+    bn_mod_add(&rhs, &rhs, &b, prime);
+    return bn_cmp(&lhs, &rhs) == 0;
+}
+
+int ecdsa_nist_verify(int curve,
+                      const u8* signature, rin_size_t sig_len,
+                      const u8* hash, rin_size_t hash_len,
+                      const u8* public_key, rin_size_t pubkey_len)
+{
+    nist_curve_t parameters;
+    u8 r_bytes[66], s_bytes[66];
+    bignum_t r, s, z, n, prime, w, u1, u2, v;
+    p256_point_t G, Q, R1, R2, R;
+    rin_size_t width;
+
+    if (curve == ECDSA_CURVE_P256) {
+        return ecdsa_p256_verify(signature, sig_len, hash, hash_len,
+                                 public_key, pubkey_len);
+    }
+    if (!signature || !hash || !public_key ||
+        nist_curve_parameters(curve, &parameters) != ECDH_OK) {
+        return ECDH_ERR_INVALID;
+    }
+    width = parameters.coordinate_size;
+    if (pubkey_len != 1 + width * 2 || public_key[0] != 0x04 ||
+        ecdsa_signature_components(r_bytes, s_bytes, width,
+                                   signature, sig_len) != ECDH_OK) {
+        return ECDH_ERR_INVALID;
+    }
+    bn_from_bytes(&r, r_bytes, width);
+    bn_from_bytes(&s, s_bytes, width);
+    bn_from_bytes(&prime, parameters.p, width);
+    bn_from_bytes(&n, parameters.n, width);
+    if (bn_is_zero(&r) || bn_cmp(&r, &n) >= 0 ||
+        bn_is_zero(&s) || bn_cmp(&s, &n) >= 0) {
+        return ECDH_ERR_INVALID;
+    }
+
+    bn_from_bytes(&Q.x, public_key + 1, width);
+    bn_from_bytes(&Q.y, public_key + 1 + width, width);
+    Q.infinity = 0;
+    if (!nist_public_point_is_valid(&Q, &prime, parameters.b, parameters.b_size))
+        return ECDH_ERR_POINT;
+
+    if (hash_len > width) hash_len = width;
+    bn_from_bytes(&z, hash, hash_len);
+    if (bn_mod_inv(&w, &s, &n) != BIGNUM_OK) return ECDH_ERR_INVALID;
+    bn_mod_mul(&u1, &z, &w, &n);
+    bn_mod_mul(&u2, &r, &w, &n);
+
+    bn_from_bytes(&G.x, parameters.gx, width);
+    bn_from_bytes(&G.y, parameters.gy, width);
+    G.infinity = 0;
+    p256_scalar_mult(&R1, &u1, &G, &prime);
+    p256_scalar_mult(&R2, &u2, &Q, &prime);
+    p256_add(&R, &R1, &R2, &prime);
+    if (R.infinity) return ECDH_ERR_VERIFY;
+    bn_mod(&v, &R.x, &n);
+    return bn_cmp(&v, &r) == 0 ? ECDH_OK : ECDH_ERR_VERIFY;
 }

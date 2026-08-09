@@ -18,15 +18,20 @@
  * ═══════════════════════════════════════ */
 
 /* 署名アルゴリズムOID */
+static const u8 OID_RSA_SHA1[] = {0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x05};
 static const u8 OID_RSA_SHA256[] = {0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B};
 static const u8 OID_RSA_SHA384[] = {0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0C};
 static const u8 OID_RSA_SHA512[] = {0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0D};
 static const u8 OID_ECDSA_SHA256[] = {0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02};
 static const u8 OID_ECDSA_SHA384[] = {0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x03};
+static const u8 OID_ECDSA_SHA512[] = {0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x04};
 
 /* 公開鍵アルゴリズムOID */
 static const u8 OID_RSA_ENCRYPTION[] = {0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01};
 static const u8 OID_EC_PUBLIC_KEY[] = {0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01};
+static const u8 OID_EC_P256[] = {0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07};
+static const u8 OID_EC_P384[] = {0x2B, 0x81, 0x04, 0x00, 0x22};
+static const u8 OID_EC_P521[] = {0x2B, 0x81, 0x04, 0x00, 0x23};
 
 /* 名前属性OID */
 static const u8 OID_CN[] = {0x55, 0x04, 0x03};  /* commonName */
@@ -173,7 +178,9 @@ static int parse_sig_alg(const u8** p, const u8* end)
     if (tag != ASN1_OID) return -1;
 
     int alg = -1;
-    if (len == sizeof(OID_RSA_SHA256) && rintls_memcmp(*p, OID_RSA_SHA256, len) == 0) {
+    if (len == sizeof(OID_RSA_SHA1) && rintls_memcmp(*p, OID_RSA_SHA1, len) == 0) {
+        alg = X509_SIG_RSA_SHA1;
+    } else if (len == sizeof(OID_RSA_SHA256) && rintls_memcmp(*p, OID_RSA_SHA256, len) == 0) {
         alg = X509_SIG_RSA_SHA256;
     } else if (len == sizeof(OID_RSA_SHA384) && rintls_memcmp(*p, OID_RSA_SHA384, len) == 0) {
         alg = X509_SIG_RSA_SHA384;
@@ -183,6 +190,8 @@ static int parse_sig_alg(const u8** p, const u8* end)
         alg = X509_SIG_ECDSA_SHA256;
     } else if (len == sizeof(OID_ECDSA_SHA384) && rintls_memcmp(*p, OID_ECDSA_SHA384, len) == 0) {
         alg = X509_SIG_ECDSA_SHA384;
+    } else if (len == sizeof(OID_ECDSA_SHA512) && rintls_memcmp(*p, OID_ECDSA_SHA512, len) == 0) {
+        alg = X509_SIG_ECDSA_SHA512;
     }
 
     *p = seq_end;
@@ -284,7 +293,20 @@ static int parse_public_key(x509_cert_t* cert, const u8** p, const u8* end)
     } else {
         return X509_ERR_UNSUPPORTED;
     }
-
+    *p += len;
+    if (cert->key_type == X509_KEY_ECDSA) {
+        if (asn1_read_tag(p, alg_end, &tag, &len) < 0 || tag != ASN1_OID)
+            return X509_ERR_UNSUPPORTED;
+        if (len == sizeof(OID_EC_P256) && rintls_memcmp(*p, OID_EC_P256, len) == 0)
+            cert->pubkey.ecdsa.curve = ECDSA_CURVE_P256;
+        else if (len == sizeof(OID_EC_P384) && rintls_memcmp(*p, OID_EC_P384, len) == 0)
+            cert->pubkey.ecdsa.curve = ECDSA_CURVE_P384;
+        else if (len == sizeof(OID_EC_P521) && rintls_memcmp(*p, OID_EC_P521, len) == 0)
+            cert->pubkey.ecdsa.curve = ECDSA_CURVE_P521;
+        else
+            return X509_ERR_UNSUPPORTED;
+        *p += len;
+    }
     *p = alg_end;
 
     /* subjectPublicKey (BIT STRING) */
@@ -296,6 +318,7 @@ static int parse_public_key(x509_cert_t* cert, const u8** p, const u8* end)
     u8 unused_bits = **p;
     (*p)++;
     len--;
+    if (unused_bits != 0) return X509_ERR_PARSE;
 
     if (cert->key_type == X509_KEY_RSA) {
         /* RSAPublicKey ::= SEQUENCE { modulus INTEGER, publicExponent INTEGER } */
@@ -318,7 +341,10 @@ static int parse_public_key(x509_cert_t* cert, const u8** p, const u8* end)
 
     } else if (cert->key_type == X509_KEY_ECDSA) {
         /* ECポイント (非圧縮形式: 0x04 || x || y) */
-        if (len > sizeof(cert->pubkey.ecdsa.point)) return -1;
+        rin_size_t expected = cert->pubkey.ecdsa.curve == ECDSA_CURVE_P256 ? 65 :
+                              cert->pubkey.ecdsa.curve == ECDSA_CURVE_P384 ? 97 : 133;
+        if (len != expected || len > sizeof(cert->pubkey.ecdsa.point) || **p != 0x04)
+            return X509_ERR_PARSE;
         rintls_memcpy(cert->pubkey.ecdsa.point, *p, len);
         cert->pubkey.ecdsa.point_len = len;
         *p += len;
@@ -482,9 +508,11 @@ int x509_parse_cert(x509_cert_t* cert, const u8* der, rin_size_t len)
     if (cert->sig_alg < 0) return X509_ERR_UNSUPPORTED;
 
     /* issuer */
+    cert->issuer_name = p;
     if (parse_name_cn(&p, tbs_end, cert->issuer_cn, sizeof(cert->issuer_cn)) < 0) {
         return X509_ERR_PARSE;
     }
+    cert->issuer_name_len = (rin_size_t)(p - cert->issuer_name);
 
     /* validity */
     if (asn1_read_tag(&p, tbs_end, &tag, &slen) < 0) return X509_ERR_PARSE;
@@ -494,9 +522,11 @@ int x509_parse_cert(x509_cert_t* cert, const u8* der, rin_size_t len)
     if (asn1_read_time(&p, validity_end, &cert->not_after) < 0) return X509_ERR_PARSE;
 
     /* subject */
+    cert->subject_name = p;
     if (parse_name_cn(&p, tbs_end, cert->subject_cn, sizeof(cert->subject_cn)) < 0) {
         return X509_ERR_PARSE;
     }
+    cert->subject_name_len = (rin_size_t)(p - cert->subject_name);
 
     /* subjectPublicKeyInfo */
     if (parse_public_key(cert, &p, tbs_end) != X509_OK) {
@@ -520,8 +550,8 @@ int x509_parse_cert(x509_cert_t* cert, const u8* der, rin_size_t len)
 
     p = tbs_end;
 
-    /* signatureAlgorithm (skip, should match) */
-    parse_sig_alg(&p, cert_end);
+    /* signatureAlgorithm must repeat the TBSCertificate algorithm exactly. */
+    if (parse_sig_alg(&p, cert_end) != cert->sig_alg) return X509_ERR_PARSE;
 
     /* signature (BIT STRING) */
     if (asn1_read_tag(&p, cert_end, &tag, &slen) < 0) return X509_ERR_PARSE;
@@ -565,14 +595,26 @@ int x509_verify_signature(const x509_cert_t* cert, const x509_cert_t* issuer)
         sha384(cert->tbs_data, cert->tbs_len, hash);
         hash_len = 48;
         break;
+    case X509_SIG_RSA_SHA512:
+    case X509_SIG_ECDSA_SHA512:
+        sha512(cert->tbs_data, cert->tbs_len, hash);
+        hash_len = 64;
+        break;
+    case X509_SIG_RSA_SHA1:
+        /* SHA-1 is recognized so legacy self-signed trust anchors can be
+         * provisioned, but no peer-chain edge may validate with it. */
+        return X509_ERR_UNSUPPORTED;
     default:
         return X509_ERR_UNSUPPORTED;
     }
 
     /* 署名を検証 */
     if (issuer->key_type == X509_KEY_RSA) {
+        if (cert->sig_alg != X509_SIG_RSA_SHA256 &&
+            cert->sig_alg != X509_SIG_RSA_SHA384 &&
+            cert->sig_alg != X509_SIG_RSA_SHA512) return X509_ERR_UNSUPPORTED;
         int hash_alg = (cert->sig_alg == X509_SIG_RSA_SHA256) ? RSA_HASH_SHA256 :
-                       (cert->sig_alg == X509_SIG_RSA_SHA384) ? RSA_HASH_SHA384 : RSA_HASH_SHA256;
+                       (cert->sig_alg == X509_SIG_RSA_SHA384) ? RSA_HASH_SHA384 : RSA_HASH_SHA512;
 
         if (rsa_pkcs1_verify(cert->signature, cert->signature_len,
                              hash, hash_len, hash_alg,
@@ -580,9 +622,12 @@ int x509_verify_signature(const x509_cert_t* cert, const x509_cert_t* issuer)
             return X509_ERR_SIGNATURE;
         }
     } else if (issuer->key_type == X509_KEY_ECDSA) {
-        if (ecdsa_p256_verify(cert->signature, cert->signature_len,
-                              hash, hash_len,
-                              issuer->pubkey.ecdsa.point,
+        if (cert->sig_alg != X509_SIG_ECDSA_SHA256 &&
+            cert->sig_alg != X509_SIG_ECDSA_SHA384 &&
+            cert->sig_alg != X509_SIG_ECDSA_SHA512) return X509_ERR_UNSUPPORTED;
+        if (ecdsa_nist_verify(issuer->pubkey.ecdsa.curve,
+                              cert->signature, cert->signature_len,
+                              hash, hash_len, issuer->pubkey.ecdsa.point,
                               issuer->pubkey.ecdsa.point_len) != ECDH_OK) {
             return X509_ERR_SIGNATURE;
         }
@@ -595,13 +640,11 @@ int x509_verify_signature(const x509_cert_t* cert, const x509_cert_t* issuer)
 
 int x509_is_self_signed(const x509_cert_t* cert)
 {
-    /* IssuerとSubjectのCNを比較 */
-    rin_size_t i = 0;
-    while (cert->issuer_cn[i] && cert->subject_cn[i]) {
-        if (cert->issuer_cn[i] != cert->subject_cn[i]) return 0;
-        i++;
-    }
-    return (cert->issuer_cn[i] == cert->subject_cn[i]);
+    return cert && cert->issuer_name && cert->subject_name &&
+           cert->issuer_name_len != 0 &&
+           cert->issuer_name_len == cert->subject_name_len &&
+           rintls_memcmp(cert->issuer_name, cert->subject_name,
+                         cert->issuer_name_len) == 0;
 }
 
 int x509_time_cmp(const x509_time_t* a, const x509_time_t* b)

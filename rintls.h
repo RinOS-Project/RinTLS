@@ -35,6 +35,7 @@ extern "C" {
 #define RINTLS_ERR_CLOSED       -6
 #define RINTLS_ERR_VERSION      -7
 #define RINTLS_ERR_DECRYPT      -8
+#define RINTLS_ERR_RANDOM       -9
 #define RINTLS_ERR_WANT_READ    -10
 #define RINTLS_ERR_WANT_WRITE   -11
 

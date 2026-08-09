@@ -142,6 +142,10 @@ extern const rin_size_t RSA_DIGESTINFO_SHA256_LEN;
 extern const u8 RSA_DIGESTINFO_SHA384[];
 extern const rin_size_t RSA_DIGESTINFO_SHA384_LEN;
 
+/* SHA-512のDigestInfo DERプレフィックス */
+extern const u8 RSA_DIGESTINFO_SHA512[];
+extern const rin_size_t RSA_DIGESTINFO_SHA512_LEN;
+
 /* SHA-1のDigestInfo DERプレフィックス */
 extern const u8 RSA_DIGESTINFO_SHA1[];
 extern const rin_size_t RSA_DIGESTINFO_SHA1_LEN;

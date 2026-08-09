@@ -155,6 +155,8 @@ static int tls_handshake_flush_pending_send(tls_handshake_ctx_t* ctx, u8 expecte
 
 void tls_handshake_init(tls_handshake_ctx_t* ctx, tls_record_ctx_t* record)
 {
+    if (!ctx) return;
+
     /* X25519自己テスト (一度だけ実行) */
     static int selftest_done = 0;
     if (!selftest_done) {
@@ -172,7 +174,12 @@ void tls_handshake_init(tls_handshake_ctx_t* ctx, tls_record_ctx_t* record)
     sha256_init(&ctx->transcript_hash);
 
     /* クライアントランダムを生成 */
-    rintls_random_bytes(ctx->client_random, 32);
+    ctx->entropy_ready =
+        rintls_random_bytes(ctx->client_random, 32) == 0;
+    if (!ctx->entropy_ready) {
+        rintls_secure_zero(ctx->client_random, sizeof(ctx->client_random));
+        ctx->last_error = TLS_HS_ERR_RANDOM;
+    }
 }
 
 void tls_handshake_clear(tls_handshake_ctx_t* ctx)
@@ -374,6 +381,8 @@ static void tls13_hkdf_expand_label(const u8* secret, rin_size_t secret_len,
 
 int tls_send_client_hello(tls_handshake_ctx_t* ctx)
 {
+    if (!ctx || !ctx->entropy_ready) return TLS_HS_ERR_RANDOM;
+
     if (ctx->pending_send_kind != TLS_PENDING_SEND_NONE) {
         int ret = tls_handshake_flush_pending_send(ctx, TLS_PENDING_SEND_CLIENT_HELLO);
         if (ret == TLS_HS_ERR_OK) {
@@ -463,21 +472,9 @@ int tls_send_client_hello(tls_handshake_ctx_t* ctx)
 
     /* 拡張: key_share (TLS 1.3) */
     /* X25519鍵ペアを生成 */
-    x25519_keygen(&ctx->x25519_keypair);
-
-    /* デバッグ: X25519鍵ペアを出力 (全32バイト) */
-    rintls_debug("[TLS] X25519 privkey: ");
-    for (int i = 0; i < 32; i++) {
-        rintls_debug_hex(ctx->x25519_keypair.private_key[i]);
-        rintls_debug(" ");
+    if (x25519_keygen(&ctx->x25519_keypair) != ECDH_OK) {
+        return TLS_HS_ERR_RANDOM;
     }
-    rintls_debug("\n");
-    rintls_debug("[TLS] X25519 pubkey: ");
-    for (int i = 0; i < 32; i++) {
-        rintls_debug_hex(ctx->x25519_keypair.public_key[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("\n");
 
     write_u16(msg + pos, TLS_EXT_KEY_SHARE);
     pos += 2;
@@ -495,15 +492,19 @@ int tls_send_client_hello(tls_handshake_ctx_t* ctx)
     /* 拡張: signature_algorithms */
     write_u16(msg + pos, TLS_EXT_SIGNATURE_ALGORITHMS);
     pos += 2;
-    write_u16(msg + pos, 8);  /* 拡張長 */
+    write_u16(msg + pos, 12);  /* 拡張長 */
     pos += 2;
-    write_u16(msg + pos, 6);  /* アルゴリズムリスト長 */
+    write_u16(msg + pos, 10);  /* アルゴリズムリスト長 */
     pos += 2;
     write_u16(msg + pos, TLS_SIG_RSA_PSS_RSAE_SHA256);
     pos += 2;
     write_u16(msg + pos, TLS_SIG_RSA_PKCS1_SHA256);
     pos += 2;
     write_u16(msg + pos, TLS_SIG_ECDSA_SECP256R1_SHA256);
+    pos += 2;
+    write_u16(msg + pos, TLS_SIG_ECDSA_SECP384R1_SHA384);
+    pos += 2;
+    write_u16(msg + pos, TLS_SIG_ECDSA_SECP521R1_SHA512);
     pos += 2;
 
     /* 拡張: server_name (SNI) */
@@ -790,17 +791,13 @@ int tls_recv_server_hello(tls_handshake_ctx_t* ctx)
             }
             rintls_debug("\n");
 
-            x25519_ecdh(ctx->shared_secret,
-                        ctx->x25519_keypair.private_key,
-                        ctx->peer_public_key);
+            if (x25519_ecdh(ctx->shared_secret,
+                            ctx->x25519_keypair.private_key,
+                            ctx->peer_public_key) != ECDH_OK) {
+                return TLS_HS_ERR_KEY_EXCHANGE;
+            }
             ctx->shared_secret_len = 32;
             rintls_debug("[TLS] X25519 ECDH computed\n");
-            rintls_debug("[TLS] shared_secret: ");
-            for (int i = 0; i < 32; i++) {
-                rintls_debug_hex(ctx->shared_secret[i]);
-                rintls_debug(" ");
-            }
-            rintls_debug("\n");
         } else {
             rintls_debug("[TLS] Unsupported named_group!\n");
             return TLS_HS_ERR_KEY_EXCHANGE;
@@ -862,16 +859,6 @@ int tls13_derive_handshake_keys(tls_handshake_ctx_t* ctx)
     }
 
     /* RFC 8446 A.1: early_secret should be 33 ad 0a 1c 60 7e c0 3b ... */
-    rintls_debug("[TLS] early_secret[0-3]: ");
-    rintls_debug_hex(early_secret[0]);
-    rintls_debug(" ");
-    rintls_debug_hex(early_secret[1]);
-    rintls_debug(" ");
-    rintls_debug_hex(early_secret[2]);
-    rintls_debug(" ");
-    rintls_debug_hex(early_secret[3]);
-    rintls_debug("\n");
-
     /* Derived Secret = Derive-Secret(Early Secret, "derived", "") */
     {
         u8 tmp[32];
@@ -900,16 +887,6 @@ int tls13_derive_handshake_keys(tls_handshake_ctx_t* ctx)
         for (i = 0; i < 32; i++) derived_secret[i] = tmp[i];
     }
 
-    rintls_debug("[TLS] derived_secret[0-3]: ");
-    rintls_debug_hex(derived_secret[0]);
-    rintls_debug(" ");
-    rintls_debug_hex(derived_secret[1]);
-    rintls_debug(" ");
-    rintls_debug_hex(derived_secret[2]);
-    rintls_debug(" ");
-    rintls_debug_hex(derived_secret[3]);
-    rintls_debug("\n");
-
     /* Handshake Secret = HKDF-Extract(Derived Secret, shared_secret) */
     {
         u8 ds_copy[32];
@@ -918,16 +895,6 @@ int tls13_derive_handshake_keys(tls_handshake_ctx_t* ctx)
                              ctx->shared_secret, ctx->shared_secret_len,
                              ctx->handshake_secret);
     }
-
-    rintls_debug("[TLS] hs_secret[0-3]: ");
-    rintls_debug_hex(ctx->handshake_secret[0]);
-    rintls_debug(" ");
-    rintls_debug_hex(ctx->handshake_secret[1]);
-    rintls_debug(" ");
-    rintls_debug_hex(ctx->handshake_secret[2]);
-    rintls_debug(" ");
-    rintls_debug_hex(ctx->handshake_secret[3]);
-    rintls_debug("\n");
 
     /* Transcript hash は関数冒頭で既に計算済み */
 
@@ -950,25 +917,6 @@ int tls13_derive_handshake_keys(tls_handshake_ctx_t* ctx)
                                  tr_copy, 32,
                                  ctx->server_handshake_traffic_secret, 32);
     }
-
-    rintls_debug("[TLS] c_hs_traffic[0-3]: ");
-    rintls_debug_hex(ctx->client_handshake_traffic_secret[0]);
-    rintls_debug(" ");
-    rintls_debug_hex(ctx->client_handshake_traffic_secret[1]);
-    rintls_debug(" ");
-    rintls_debug_hex(ctx->client_handshake_traffic_secret[2]);
-    rintls_debug(" ");
-    rintls_debug_hex(ctx->client_handshake_traffic_secret[3]);
-    rintls_debug("\n");
-    rintls_debug("[TLS] s_hs_traffic[0-3]: ");
-    rintls_debug_hex(ctx->server_handshake_traffic_secret[0]);
-    rintls_debug(" ");
-    rintls_debug_hex(ctx->server_handshake_traffic_secret[1]);
-    rintls_debug(" ");
-    rintls_debug_hex(ctx->server_handshake_traffic_secret[2]);
-    rintls_debug(" ");
-    rintls_debug_hex(ctx->server_handshake_traffic_secret[3]);
-    rintls_debug("\n");
 
     /* 鍵とIVを導出 - volatile で最適化による破壊を防止 */
     volatile u8 server_key[16], server_iv[12];
@@ -998,20 +946,6 @@ int tls13_derive_handshake_keys(tls_handshake_ctx_t* ctx)
         for (i = 0; i < 12; i++) client_iv[i] = tmp_iv[i];
     }
 
-    /* デバッグ: 導出された鍵を出力 */
-    rintls_debug("[TLS_HS] full server_key: ");
-    for (i = 0; i < 16; i++) {
-        rintls_debug_hex(server_key[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("\n");
-    rintls_debug("[TLS_HS] full server_iv: ");
-    for (i = 0; i < 12; i++) {
-        rintls_debug_hex(server_iv[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("\n");
-
     /* レコード層に暗号化を設定 - volatileからコピー */
     {
         u8 sk[16], si[12], ck[16], ci[12];
@@ -1033,17 +967,6 @@ int tls13_derive_application_keys(tls_handshake_ctx_t* ctx)
     volatile u8 master_secret[32];
     volatile u8 empty_hash[32];
     int i;
-
-    /* デバッグ: handshake_secretが正しいか確認 */
-    rintls_debug("[TLS_APP] handshake_secret[0-3]: ");
-    rintls_debug_hex(ctx->handshake_secret[0]);
-    rintls_debug(" ");
-    rintls_debug_hex(ctx->handshake_secret[1]);
-    rintls_debug(" ");
-    rintls_debug_hex(ctx->handshake_secret[2]);
-    rintls_debug(" ");
-    rintls_debug_hex(ctx->handshake_secret[3]);
-    rintls_debug("\n");
 
     {
         u8 tmp[32];
@@ -1070,26 +993,6 @@ int tls13_derive_application_keys(tls_handshake_ctx_t* ctx)
         for (i = 0; i < 32; i++) master_secret[i] = tmp[i];
     }
 
-    rintls_debug("[TLS_APP] derived_secret[0-3]: ");
-    rintls_debug_hex(derived_secret[0]);
-    rintls_debug(" ");
-    rintls_debug_hex(derived_secret[1]);
-    rintls_debug(" ");
-    rintls_debug_hex(derived_secret[2]);
-    rintls_debug(" ");
-    rintls_debug_hex(derived_secret[3]);
-    rintls_debug("\n");
-
-    rintls_debug("[TLS_APP] master_secret[0-3]: ");
-    rintls_debug_hex(master_secret[0]);
-    rintls_debug(" ");
-    rintls_debug_hex(master_secret[1]);
-    rintls_debug(" ");
-    rintls_debug_hex(master_secret[2]);
-    rintls_debug(" ");
-    rintls_debug_hex(master_secret[3]);
-    rintls_debug("\n");
-
     /* RFC 8446: アプリケーション鍵は ClientHello...server Finished の
      * トランスクリプトハッシュで導出 (client Finished を含まない)
      * server_finished_transcript はこの関数呼び出し前に保存済み */
@@ -1099,13 +1002,6 @@ int tls13_derive_application_keys(tls_handshake_ctx_t* ctx)
         rintls_debug(" ");
     }
     rintls_debug("\n");
-    rintls_debug("[TLS_APP] full master_secret: ");
-    for (i = 0; i < 32; i++) {
-        rintls_debug_hex(master_secret[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("\n");
-
     /* Application Traffic Secrets */
     {
         u8 ms_copy[32];
@@ -1125,13 +1021,6 @@ int tls13_derive_application_keys(tls_handshake_ctx_t* ctx)
                                  ctx->server_application_traffic_secret, 32);
     }
 
-    rintls_debug("[TLS_APP] full s_ap_traffic: ");
-    for (i = 0; i < 32; i++) {
-        rintls_debug_hex(ctx->server_application_traffic_secret[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("\n");
-
     /* 鍵とIVを導出 - volatile で最適化による破壊を防止 */
     volatile u8 server_key[16], server_iv[12];
     volatile u8 client_key[16], client_iv[12];
@@ -1148,19 +1037,6 @@ int tls13_derive_application_keys(tls_handshake_ctx_t* ctx)
         for (i = 0; i < 12; i++) server_iv[i] = tmp_iv[i];
     }
 
-    rintls_debug("[TLS_APP] full server_key: ");
-    for (i = 0; i < 16; i++) {
-        rintls_debug_hex(server_key[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("\n");
-    rintls_debug("[TLS_APP] full server_iv: ");
-    for (i = 0; i < 12; i++) {
-        rintls_debug_hex(server_iv[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("\n");
-
     {
         u8 tmp_key[16], tmp_iv[12];
         tls13_hkdf_expand_label(ctx->client_application_traffic_secret, 32,
@@ -1172,19 +1048,6 @@ int tls13_derive_application_keys(tls_handshake_ctx_t* ctx)
                                  tmp_iv, 12);
         for (i = 0; i < 12; i++) client_iv[i] = tmp_iv[i];
     }
-
-    rintls_debug("[TLS_APP] full client_key: ");
-    for (i = 0; i < 16; i++) {
-        rintls_debug_hex(client_key[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("\n");
-    rintls_debug("[TLS_APP] full client_iv: ");
-    for (i = 0; i < 12; i++) {
-        rintls_debug_hex(client_iv[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("\n");
 
     /* レコード層に暗号化を設定 - volatileからコピー */
     rintls_debug("[TLS_APP] *** SWITCHING TO APPLICATION KEYS ***\n");
@@ -1378,6 +1241,7 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
                 rintls_memcpy(ctx->server_ecdsa_key, cur->pubkey.ecdsa.point,
                               cur->pubkey.ecdsa.point_len);
                 ctx->server_ecdsa_key_len = cur->pubkey.ecdsa.point_len;
+                ctx->server_ecdsa_curve = cur->pubkey.ecdsa.curve;
             } else {
                 chain_err = TLS_HS_ERR_CERTIFICATE;
                 break;
@@ -1485,7 +1349,7 @@ int tls_recv_certificate_verify(tls_handshake_ctx_t* ctx)
         rintls_memcpy(signed_data + pos, transcript_hash, hash_len);
         pos += hash_len;
 
-        u8 msg_hash[32];
+        u8 msg_hash[64];
         switch (sig_scheme) {
         case TLS_SIG_RSA_PSS_RSAE_SHA256:
             if (ctx->server_key_type == 0) {
@@ -1495,9 +1359,31 @@ int tls_recv_certificate_verify(tls_handshake_ctx_t* ctx)
             }
             break;
         case TLS_SIG_ECDSA_SECP256R1_SHA256:
-            if (ctx->server_key_type == 1) {
+            if (ctx->server_key_type == 1 &&
+                ctx->server_ecdsa_curve == ECDSA_CURVE_P256) {
                 sha256(signed_data, pos, msg_hash);
-                verify_ok = (ecdsa_p256_verify(sig, sig_len, msg_hash, 32,
+                verify_ok = (ecdsa_nist_verify(ECDSA_CURVE_P256,
+                                               sig, sig_len, msg_hash, 32,
+                                               ctx->server_ecdsa_key,
+                                               ctx->server_ecdsa_key_len) == ECDH_OK);
+            }
+            break;
+        case TLS_SIG_ECDSA_SECP384R1_SHA384:
+            if (ctx->server_key_type == 1 &&
+                ctx->server_ecdsa_curve == ECDSA_CURVE_P384) {
+                sha384(signed_data, pos, msg_hash);
+                verify_ok = (ecdsa_nist_verify(ECDSA_CURVE_P384,
+                                               sig, sig_len, msg_hash, 48,
+                                               ctx->server_ecdsa_key,
+                                               ctx->server_ecdsa_key_len) == ECDH_OK);
+            }
+            break;
+        case TLS_SIG_ECDSA_SECP521R1_SHA512:
+            if (ctx->server_key_type == 1 &&
+                ctx->server_ecdsa_curve == ECDSA_CURVE_P521) {
+                sha512(signed_data, pos, msg_hash);
+                verify_ok = (ecdsa_nist_verify(ECDSA_CURVE_P521,
+                                               sig, sig_len, msg_hash, 64,
                                                ctx->server_ecdsa_key,
                                                ctx->server_ecdsa_key_len) == ECDH_OK);
             }
@@ -1555,16 +1441,9 @@ int tls_recv_finished(tls_handshake_ctx_t* ctx)
         /* TODO: ハンドシェイク断片化対応 - 現在はエラー */
         return TLS_HS_ERR_UNEXPECTED;
     }
-
-    /* デバッグ: サーバーFinished verify_data */
-    rintls_debug("[TLS_FIN] server verify_data (len=");
-    rintls_debug_hex(msg_len);
-    rintls_debug("): ");
-    for (int i = 0; i < (int)msg_len && i < 32; i++) {
-        rintls_debug_hex(msg[4 + i]);
-        rintls_debug(" ");
+    if (msg_len != (ctx->is_tls13 ? 32u : 12u)) {
+        return TLS_HS_ERR_VERIFY;
     }
-    rintls_debug("\n");
 
     if (ctx->is_tls13) {
         /* TLS 1.3: ServerFinished検証 (トランスクリプトに追加する前に検証)
@@ -1581,12 +1460,6 @@ int tls_recv_finished(tls_handshake_ctx_t* ctx)
             for (int i = 0; i < 32; i++) {
                 transcript_hash[i] = pre_hash[i];
             }
-            rintls_debug("[TLS_FIN_DBG] BEFORE HKDF transcript: ");
-            for (int i = 0; i < 8; i++) {
-                rintls_debug_hex(transcript_hash[i]);
-                rintls_debug(" ");
-            }
-            rintls_debug("...\n");
         }
 
         /* finished_key = HKDF-Expand-Label(server_hs_traffic_secret, "finished", "", 32)
@@ -1602,28 +1475,6 @@ int tls_recv_finished(tls_handshake_ctx_t* ctx)
                 finished_key[i] = tmp_key[i];
             }
         }
-
-        /* HKDF後にtranscript_hash stateをダンプ (保存済みのtranscript_hashを使用) */
-        rintls_debug("[TLS_FIN_DBG] AFTER HKDF saved transcript: ");
-        for (int i = 0; i < 8; i++) {
-            rintls_debug_hex(transcript_hash[i]);
-            rintls_debug(" ");
-        }
-        rintls_debug("...\n");
-
-        rintls_debug("[TLS_FIN] finished_key: ");
-        for (int i = 0; i < 32; i++) {
-            rintls_debug_hex(finished_key[i]);
-            rintls_debug(" ");
-        }
-        rintls_debug("\n");
-
-        rintls_debug("[TLS_FIN] transcript_hash: ");
-        for (int i = 0; i < 32; i++) {
-            rintls_debug_hex(transcript_hash[i]);
-            rintls_debug(" ");
-        }
-        rintls_debug("\n");
 
         /* expected_verify_data = HMAC(finished_key, transcript_hash)
          * volatileから非volatileにコピーしてHMAC呼び出し */
@@ -1642,24 +1493,13 @@ int tls_recv_finished(tls_handshake_ctx_t* ctx)
             }
         }
 
-        rintls_debug("[TLS_FIN] expected: ");
-        for (int i = 0; i < 32; i++) {
-            rintls_debug_hex(expected_verify_data[i]);
-            rintls_debug(" ");
-        }
-        rintls_debug("\n");
-        rintls_debug("\n");
-
         /* 検証: 受信したverify_dataと期待値を比較 */
-        int match = 1;
+        u8 difference = 0;
         for (int i = 0; i < 32; i++) {
-            if (msg[4 + i] != expected_verify_data[i]) {
-                match = 0;
-                break;
-            }
+            difference |= (u8)(msg[4 + i] ^ expected_verify_data[i]);
         }
 
-        if (!match) {
+        if (difference != 0) {
             rintls_debug("[TLS] ServerFinished VERIFY FAILED!\n");
             return TLS_HS_ERR_VERIFY;
         }
@@ -1676,23 +1516,13 @@ int tls_recv_finished(tls_handshake_ctx_t* ctx)
                           transcript_hash, 32,
                           expected_verify_data, 12);
 
-        rintls_debug("[TLS12] server finished expected: ");
-        for (int i = 0; i < 12; i++) {
-            rintls_debug_hex(expected_verify_data[i]);
-            rintls_debug(" ");
-        }
-        rintls_debug("\n");
-
         /* 検証 */
-        int match = 1;
+        u8 difference = 0;
         for (int i = 0; i < 12; i++) {
-            if (msg[4 + i] != expected_verify_data[i]) {
-                match = 0;
-                break;
-            }
+            difference |= (u8)(msg[4 + i] ^ expected_verify_data[i]);
         }
 
-        if (!match) {
+        if (difference != 0) {
             rintls_debug("[TLS12] ServerFinished VERIFY FAILED!\n");
             return TLS_HS_ERR_VERIFY;
         }
@@ -1722,15 +1552,6 @@ int tls_send_finished(tls_handshake_ctx_t* ctx)
 
     if (ctx->is_tls13) {
         tls_transcript_hash(ctx, ctx->server_finished_transcript);
-        rintls_debug("[TLS] Saved server_finished_transcript[0-3]: ");
-        rintls_debug_hex(ctx->server_finished_transcript[0]);
-        rintls_debug(" ");
-        rintls_debug_hex(ctx->server_finished_transcript[1]);
-        rintls_debug(" ");
-        rintls_debug_hex(ctx->server_finished_transcript[2]);
-        rintls_debug(" ");
-        rintls_debug_hex(ctx->server_finished_transcript[3]);
-        rintls_debug("\n");
 
         tls13_hkdf_expand_label(ctx->client_handshake_traffic_secret, 32,
                                  TLS13_LABEL_FINISHED, 8,
@@ -1739,37 +1560,8 @@ int tls_send_finished(tls_handshake_ctx_t* ctx)
 
         tls_transcript_hash(ctx, transcript);
 
-        rintls_debug("[TLS] send_finished transcript[0-3]: ");
-        rintls_debug_hex(transcript[0]);
-        rintls_debug(" ");
-        rintls_debug_hex(transcript[1]);
-        rintls_debug(" ");
-        rintls_debug_hex(transcript[2]);
-        rintls_debug(" ");
-        rintls_debug_hex(transcript[3]);
-        rintls_debug("\n");
-        rintls_debug("[TLS] finished_key[0-3]: ");
-        rintls_debug_hex(finished_key[0]);
-        rintls_debug(" ");
-        rintls_debug_hex(finished_key[1]);
-        rintls_debug(" ");
-        rintls_debug_hex(finished_key[2]);
-        rintls_debug(" ");
-        rintls_debug_hex(finished_key[3]);
-        rintls_debug("\n");
-
         hmac_sha256(finished_key, 32, transcript, 32, verify_data);
         verify_data_len = 32;
-
-        rintls_debug("[TLS] verify_data[0-3]: ");
-        rintls_debug_hex(verify_data[0]);
-        rintls_debug(" ");
-        rintls_debug_hex(verify_data[1]);
-        rintls_debug(" ");
-        rintls_debug_hex(verify_data[2]);
-        rintls_debug(" ");
-        rintls_debug_hex(verify_data[3]);
-        rintls_debug("\n");
     } else {
         /* TLS 1.2: verify_data = PRF(master_secret, "client finished", Hash(handshake_messages))[0..11] */
         tls_transcript_hash(ctx, transcript);
@@ -1780,12 +1572,6 @@ int tls_send_finished(tls_handshake_ctx_t* ctx)
                           verify_data, 12);
         verify_data_len = 12;
 
-        rintls_debug("[TLS12] client finished verify_data: ");
-        for (int i = 0; i < 12; i++) {
-            rintls_debug_hex(verify_data[i]);
-            rintls_debug(" ");
-        }
-        rintls_debug("\n");
     }
 
     /* Finishedメッセージを構築 */
@@ -2115,30 +1901,74 @@ int tls_recv_server_key_exchange(tls_handshake_ctx_t* ctx)
 
     if (!verify_ok) {
         /* 署名対象: client_random || server_random || ServerECDHParams (RFC 5246 7.4.3) */
-        u8 hash[32];
-        sha256_ctx h;
-        sha256_init(&h);
-        sha256_update(&h, ctx->client_random, 32);
-        sha256_update(&h, ctx->server_random, 32);
-        sha256_update(&h, params_start, (rin_size_t)(params_end - params_start));
-        sha256_final(&h, hash);
+        u8 hash[64];
 
         switch (sig_alg) {
         case TLS_SIG_RSA_PKCS1_SHA256:
             if (ctx->server_key_type == 0) {
+                sha256_ctx h;
+                sha256_init(&h);
+                sha256_update(&h, ctx->client_random, 32);
+                sha256_update(&h, ctx->server_random, 32);
+                sha256_update(&h, params_start, (rin_size_t)(params_end - params_start));
+                sha256_final(&h, hash);
                 verify_ok = (rsa_pkcs1_verify(sig, sig_len, hash, 32, RSA_HASH_SHA256,
                                                &ctx->server_rsa_key) == RSA_OK);
             }
             break;
         case TLS_SIG_RSA_PSS_RSAE_SHA256:
             if (ctx->server_key_type == 0) {
+                sha256_ctx h;
+                sha256_init(&h);
+                sha256_update(&h, ctx->client_random, 32);
+                sha256_update(&h, ctx->server_random, 32);
+                sha256_update(&h, params_start, (rin_size_t)(params_end - params_start));
+                sha256_final(&h, hash);
                 verify_ok = (rsa_pss_verify_sha256(sig, sig_len, hash,
                                                     &ctx->server_rsa_key) == RSA_OK);
             }
             break;
         case TLS_SIG_ECDSA_SECP256R1_SHA256:
-            if (ctx->server_key_type == 1) {
-                verify_ok = (ecdsa_p256_verify(sig, sig_len, hash, 32,
+            if (ctx->server_key_type == 1 &&
+                ctx->server_ecdsa_curve == ECDSA_CURVE_P256) {
+                sha256_ctx h;
+                sha256_init(&h);
+                sha256_update(&h, ctx->client_random, 32);
+                sha256_update(&h, ctx->server_random, 32);
+                sha256_update(&h, params_start, (rin_size_t)(params_end - params_start));
+                sha256_final(&h, hash);
+                verify_ok = (ecdsa_nist_verify(ECDSA_CURVE_P256,
+                                               sig, sig_len, hash, 32,
+                                               ctx->server_ecdsa_key,
+                                               ctx->server_ecdsa_key_len) == ECDH_OK);
+            }
+            break;
+        case TLS_SIG_ECDSA_SECP384R1_SHA384:
+            if (ctx->server_key_type == 1 &&
+                ctx->server_ecdsa_curve == ECDSA_CURVE_P384) {
+                sha384_ctx h;
+                sha384_init(&h);
+                sha384_update(&h, ctx->client_random, 32);
+                sha384_update(&h, ctx->server_random, 32);
+                sha384_update(&h, params_start, (rin_size_t)(params_end - params_start));
+                sha384_final(&h, hash);
+                verify_ok = (ecdsa_nist_verify(ECDSA_CURVE_P384,
+                                               sig, sig_len, hash, 48,
+                                               ctx->server_ecdsa_key,
+                                               ctx->server_ecdsa_key_len) == ECDH_OK);
+            }
+            break;
+        case TLS_SIG_ECDSA_SECP521R1_SHA512:
+            if (ctx->server_key_type == 1 &&
+                ctx->server_ecdsa_curve == ECDSA_CURVE_P521) {
+                sha512_ctx h;
+                sha512_init(&h);
+                sha512_update(&h, ctx->client_random, 32);
+                sha512_update(&h, ctx->server_random, 32);
+                sha512_update(&h, params_start, (rin_size_t)(params_end - params_start));
+                sha512_final(&h, hash);
+                verify_ok = (ecdsa_nist_verify(ECDSA_CURVE_P521,
+                                               sig, sig_len, hash, 64,
                                                ctx->server_ecdsa_key,
                                                ctx->server_ecdsa_key_len) == ECDH_OK);
             }
@@ -2222,22 +2052,27 @@ int tls_send_client_key_exchange(tls_handshake_ctx_t* ctx)
 
     if (ctx->named_group == TLS_GROUP_X25519) {
         /* X25519鍵ペアを生成 */
-        x25519_keygen(&ctx->x25519_keypair);
+        if (x25519_keygen(&ctx->x25519_keypair) != ECDH_OK) {
+            return TLS_HS_ERR_RANDOM;
+        }
         rintls_memcpy(pubkey, ctx->x25519_keypair.public_key, 32);
         pubkey_len = 32;
 
         /* 共有秘密を計算 */
-        x25519_ecdh(ctx->shared_secret,
-                    ctx->x25519_keypair.private_key,
-                    ctx->peer_public_key);
+        if (x25519_ecdh(ctx->shared_secret,
+                        ctx->x25519_keypair.private_key,
+                        ctx->peer_public_key) != ECDH_OK) {
+            return TLS_HS_ERR_KEY_EXCHANGE;
+        }
         ctx->shared_secret_len = 32;
 
         rintls_debug("[TLS12] X25519 ECDH computed\n");
     } else if (ctx->named_group == TLS_GROUP_SECP256R1) {
         /* P-256鍵ペアを生成 */
-        p256_keygen(&ctx->p256_keypair);
-        pubkey[0] = 0x04;  /* uncompressed point */
-        rintls_memcpy(pubkey + 1, ctx->p256_keypair.public_key, 64);
+        if (p256_keygen(&ctx->p256_keypair) != ECDH_OK) {
+            return TLS_HS_ERR_RANDOM;
+        }
+        rintls_memcpy(pubkey, ctx->p256_keypair.public_key, 65);
         pubkey_len = 65;
 
         /* 共有秘密を計算 */
@@ -2246,9 +2081,12 @@ int tls_send_client_key_exchange(tls_handshake_ctx_t* ctx)
             rintls_debug("[TLS12] Invalid P-256 peer public key format\n");
             return TLS_HS_ERR_KEY_EXCHANGE;
         }
-        p256_ecdh(ctx->shared_secret,
-                  ctx->p256_keypair.private_key,
-                  ctx->peer_public_key, ctx->peer_public_key_len);
+        if (p256_ecdh(ctx->shared_secret,
+                      ctx->p256_keypair.private_key,
+                      ctx->peer_public_key,
+                      ctx->peer_public_key_len) != ECDH_OK) {
+            return TLS_HS_ERR_KEY_EXCHANGE;
+        }
         ctx->shared_secret_len = 32;
 
         rintls_debug("[TLS12] P-256 ECDH computed\n");
@@ -2258,13 +2096,6 @@ int tls_send_client_key_exchange(tls_handshake_ctx_t* ctx)
         rintls_debug("\n");
         return TLS_HS_ERR_KEY_EXCHANGE;
     }
-
-    rintls_debug("[TLS12] shared_secret: ");
-    for (int i = 0; i < 8; i++) {
-        rintls_debug_hex(ctx->shared_secret[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("...\n");
 
     /* ClientKeyExchangeメッセージを構築 */
     msg[pos++] = TLS_HS_CLIENT_KEY_EXCHANGE;
@@ -2316,13 +2147,6 @@ int tls12_derive_master_secret(tls_handshake_ctx_t* ctx)
                       seed, 64,
                       ctx->master_secret, 48);
 
-    rintls_debug("[TLS12] master_secret: ");
-    for (int i = 0; i < 8; i++) {
-        rintls_debug_hex(ctx->master_secret[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("...\n");
-
     return TLS_HS_ERR_OK;
 }
 
@@ -2356,31 +2180,6 @@ int tls12_derive_keys(tls_handshake_ctx_t* ctx)
     u8* server_write_key = key_block + 16;
     u8* client_write_iv = key_block + 32;
     u8* server_write_iv = key_block + 36;
-
-    rintls_debug("[TLS12] client_write_key: ");
-    for (int i = 0; i < 16; i++) {
-        rintls_debug_hex(client_write_key[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("\n");
-    rintls_debug("[TLS12] server_write_key: ");
-    for (int i = 0; i < 16; i++) {
-        rintls_debug_hex(server_write_key[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("\n");
-    rintls_debug("[TLS12] client_write_iv: ");
-    for (int i = 0; i < 4; i++) {
-        rintls_debug_hex(client_write_iv[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("\n");
-    rintls_debug("[TLS12] server_write_iv: ");
-    for (int i = 0; i < 4; i++) {
-        rintls_debug_hex(server_write_iv[i]);
-        rintls_debug(" ");
-    }
-    rintls_debug("\n");
 
     /* レコード層に暗号化を設定 */
     tls_record_enable_cipher_1_2(ctx->record, TLS_CIPHER_AES_128_GCM,
