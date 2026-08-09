@@ -326,5 +326,7 @@ int tls_compute_verify_data(tls_handshake_ctx_t* ctx, int is_client, u8* verify_
 #define TLS_HS_ERR_WANT_READ        -10
 #define TLS_HS_ERR_WANT_WRITE       -11
 #define TLS_HS_ERR_RANDOM            -12
+#define TLS_HS_ERR_HOSTNAME          -13
+#define TLS_HS_ERR_TRUST             -14
 
 #endif /* RINTLS_HANDSHAKE_H */

@@ -165,6 +165,12 @@ int x509_check_validity(const x509_cert_t* cert);
 /* ホスト名をチェック (CNまたはSAN) */
 int x509_check_hostname(const x509_cert_t* cert, const char* hostname);
 
+/* Match the identity of a cross-signed CA certificate against a configured
+ * trust anchor.  Both the DER-encoded subject and the complete public key
+ * must be identical. */
+int x509_trust_identity_matches(const x509_cert_t* candidate,
+                                const x509_cert_t* trusted);
+
 /* ═══════════════════════════════════════
  * 証明書チェーン検証
  * ═══════════════════════════════════════ */

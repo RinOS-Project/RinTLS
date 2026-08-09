@@ -38,6 +38,7 @@ extern "C" {
 #define RINTLS_ERR_RANDOM       -9
 #define RINTLS_ERR_WANT_READ    -10
 #define RINTLS_ERR_WANT_WRITE   -11
+#define RINTLS_ERR_TRUST        -12
 
 /* ═══════════════════════════════════════
  * オプションフラグ
@@ -52,6 +53,7 @@ extern "C" {
  * ═══════════════════════════════════════ */
 
 typedef struct rintls_ctx rintls_ctx;
+typedef struct rintls_trust_store rintls_trust_store;
 
 /* ═══════════════════════════════════════
  * I/Oコールバック型
@@ -127,6 +129,18 @@ int rintls_add_trust_anchor_der(rintls_ctx* ctx,
 int rintls_load_trust_store(rintls_ctx* ctx,
                             const void* bundle,
                             rin_size_t bundle_len);
+
+/* Parse an immutable Rin CA bundle once so it can be shared safely by many
+ * TLS contexts.  The returned store owns one reference. */
+int rintls_trust_store_from_bundle(const void* bundle,
+                                   rin_size_t bundle_len,
+                                   rintls_trust_store** store_out);
+void rintls_trust_store_retain(rintls_trust_store* store);
+void rintls_trust_store_release(rintls_trust_store* store);
+u32 rintls_trust_store_anchor_count(const rintls_trust_store* store);
+
+/* Replace the context's current anchors with a retained reference to store. */
+int rintls_set_trust_store(rintls_ctx* ctx, rintls_trust_store* store);
 
 void rintls_clear_trust_anchors(rintls_ctx* ctx);
 u32 rintls_trust_anchor_count(rintls_ctx* ctx);

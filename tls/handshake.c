@@ -1223,7 +1223,7 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
             if (ctx->server_name[0] != '\0' &&
                 x509_check_hostname(cur, ctx->server_name) != X509_OK) {
                 rintls_debug("[TLS] Certificate hostname mismatch\n");
-                chain_err = TLS_HS_ERR_VERIFY;
+                chain_err = TLS_HS_ERR_HOSTNAME;
                 break;
             }
             if (x509_check_validity(cur) != X509_OK) {
@@ -1273,7 +1273,7 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
         if (!prev || !ctx->trust_anchor_verify ||
             ctx->trust_anchor_verify(ctx->trust_anchor_opaque, prev) != 1) {
             rintls_debug("[TLS] Certificate chain has no trusted Rin anchor\n");
-            chain_err = TLS_HS_ERR_VERIFY;
+            chain_err = TLS_HS_ERR_TRUST;
         }
     }
 

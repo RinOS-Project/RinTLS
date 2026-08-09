@@ -63,6 +63,10 @@ int rsa_pubkey_set(rsa_pubkey_t* key,
                    const u8* n, rin_size_t n_len,
                    const u8* e, rin_size_t e_len)
 {
+    if (!key || !n || !e) {
+        return RSA_ERR_KEY;
+    }
+
     /* 先頭のゼロをスキップ */
     while (n_len > 0 && *n == 0) {
         n++;
@@ -73,7 +77,8 @@ int rsa_pubkey_set(rsa_pubkey_t* key,
         e_len--;
     }
 
-    if (n_len == 0 || e_len == 0) {
+    if (n_len == 0 || e_len == 0 || n_len > RSA_MAX_KEY_SIZE ||
+        e_len > BIGNUM_MAX_BITS / 8) {
         return RSA_ERR_KEY;
     }
 

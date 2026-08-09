@@ -299,7 +299,7 @@ static int bn_add_abs(bignum_t* r, const bignum_t* a, const bignum_t* b)
 {
     rin_size_t max_used = (a->used > b->used) ? a->used : b->used;
 
-    if (max_used + 1 > BIGNUM_MAX_LIMBS) {
+    if (max_used > BIGNUM_MAX_LIMBS) {
         return BIGNUM_ERR_OVERFLOW;
     }
 
@@ -314,6 +314,9 @@ static int bn_add_abs(bignum_t* r, const bignum_t* a, const bignum_t* b)
     }
 
     if (carry) {
+        if (max_used == BIGNUM_MAX_LIMBS) {
+            return BIGNUM_ERR_OVERFLOW;
+        }
         r->limbs[max_used] = (u32)carry;
         r->used = max_used + 1;
     } else {
@@ -529,38 +532,104 @@ int bn_mod_sub(bignum_t* r, const bignum_t* a, const bignum_t* b, const bignum_t
     return bn_mod(r, &tmp, m);
 }
 
+/* Add two already-reduced, non-negative values without ever materializing a
+ * value wider than the modulus.  This is the primitive used by the wide
+ * modular-multiplication fallback below. */
+static int bn_mod_add_reduced(bignum_t* r, const bignum_t* a,
+                              const bignum_t* b, const bignum_t* m)
+{
+    bignum_t gap;
+    int ret;
+
+    if (!r || !a || !b || !m || a->sign || b->sign || m->sign ||
+        bn_is_zero(m) || bn_cmp_abs(a, m) >= 0 || bn_cmp_abs(b, m) >= 0) {
+        return BIGNUM_ERR_INVALID;
+    }
+
+    /* If a >= m-b, a+b would reach the modulus.  Compute the equivalent
+     * a-(m-b) instead, which remains within the fixed-width representation. */
+    ret = bn_sub(&gap, m, b);
+    if (ret != BIGNUM_OK) return ret;
+    if (bn_cmp_abs(a, &gap) >= 0)
+        return bn_sub(r, a, &gap);
+    return bn_add(r, a, b);
+}
+
 int bn_mod_mul(bignum_t* r, const bignum_t* a, const bignum_t* b, const bignum_t* m)
 {
     bignum_t tmp;
-    int ret = bn_mul(&tmp, a, b);
-    if (ret != BIGNUM_OK) return ret;
+    int ret;
 
-    return bn_mod(r, &tmp, m);
+    if (!r || !a || !b || !m || a->sign || b->sign || m->sign ||
+        bn_is_zero(m)) {
+        return BIGNUM_ERR_INVALID;
+    }
+
+    /* Preserve the existing fast path whenever the complete product fits. */
+    if (a->used + b->used <= BIGNUM_MAX_LIMBS) {
+        ret = bn_mul(&tmp, a, b);
+        if (ret != BIGNUM_OK) return ret;
+        return bn_mod(r, &tmp, m);
+    }
+
+    /* A 4096-bit RSA residue squared needs an 8192-bit temporary.  Keep the
+     * public bignum bound at 4096 bits and form the product modulo m using
+     * interleaved addition/doubling instead. */
+    bignum_t multiplicand, multiplier, result;
+    ret = bn_mod(&multiplicand, a, m);
+    if (ret != BIGNUM_OK) return ret;
+    ret = bn_mod(&multiplier, b, m);
+    if (ret != BIGNUM_OK) return ret;
+    bn_init(&result);
+
+    rin_size_t multiplier_bits = bn_bitlen(&multiplier);
+    for (rin_size_t i = 0; i < multiplier_bits; ++i) {
+        if (bn_get_bit(&multiplier, i)) {
+            ret = bn_mod_add_reduced(&result, &result, &multiplicand, m);
+            if (ret != BIGNUM_OK) return ret;
+        }
+        if (i + 1 < multiplier_bits) {
+            ret = bn_mod_add_reduced(&multiplicand, &multiplicand,
+                                     &multiplicand, m);
+            if (ret != BIGNUM_OK) return ret;
+        }
+    }
+
+    bn_copy(r, &result);
+    return BIGNUM_OK;
 }
 
 /* モジュラ冪乗 (二乗-乗算法) */
 int bn_mod_exp(bignum_t* r, const bignum_t* base, const bignum_t* exp, const bignum_t* m)
 {
+    int ret;
+
     if (bn_is_zero(m)) {
         return BIGNUM_ERR_DIVZERO;
     }
 
     if (bn_is_zero(exp)) {
-        bn_set_u32(r, 1);
-        return BIGNUM_OK;
+        bignum_t one;
+        bn_set_u32(&one, 1);
+        return bn_mod(r, &one, m);
     }
 
     bignum_t result, b;
     bn_set_u32(&result, 1);
-    bn_mod(&b, base, m);
+    ret = bn_mod(&b, base, m);
+    if (ret != BIGNUM_OK) return ret;
 
     rin_size_t exp_bits = bn_bitlen(exp);
 
     for (rin_size_t i = 0; i < exp_bits; i++) {
         if (bn_get_bit(exp, i)) {
-            bn_mod_mul(&result, &result, &b, m);
+            ret = bn_mod_mul(&result, &result, &b, m);
+            if (ret != BIGNUM_OK) return ret;
         }
-        bn_mod_mul(&b, &b, &b, m);
+        if (i + 1 < exp_bits) {
+            ret = bn_mod_mul(&b, &b, &b, m);
+            if (ret != BIGNUM_OK) return ret;
+        }
     }
 
     bn_copy(r, &result);

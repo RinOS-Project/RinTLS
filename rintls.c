@@ -23,6 +23,12 @@ typedef struct rintls_trust_anchor {
     struct rintls_trust_anchor* next;
 } rintls_trust_anchor;
 
+struct rintls_trust_store {
+    rintls_trust_anchor* trust_anchors;
+    u32 trust_anchor_count;
+    u32 reference_count;
+};
+
 struct rintls_ctx {
     /* レコード層 */
     tls_record_ctx_t record;
@@ -35,6 +41,7 @@ struct rintls_ctx {
     u32 options;
     rintls_trust_anchor* trust_anchors;
     u32 trust_anchor_count;
+    rintls_trust_store* shared_trust_store;
 
     /* 状態 */
     int connected;
@@ -51,13 +58,10 @@ struct rintls_ctx {
 #define RINTLS_MAX_TRUST_ANCHORS 256u
 #define RINTLS_MAX_TRUST_BUNDLE_BYTES (4u * 1024u * 1024u)
 
-static int rintls_verify_chain_top(void* opaque, const x509_cert_t* chain_top)
+static int rintls_verify_against_anchors(rintls_trust_anchor* anchor,
+                                         const x509_cert_t* chain_top)
 {
-    rintls_ctx* ctx = (rintls_ctx*)opaque;
-    rintls_trust_anchor* anchor;
-    if (!ctx || !chain_top) return 0;
-
-    for (anchor = ctx->trust_anchors; anchor; anchor = anchor->next) {
+    for (; anchor; anchor = anchor->next) {
         x509_cert_t* trusted = &anchor->certificate;
         if (!trusted->is_ca || x509_check_validity(trusted) != X509_OK) continue;
 
@@ -65,6 +69,10 @@ static int rintls_verify_chain_top(void* opaque, const x509_cert_t* chain_top)
             chain_top->raw_len != 0 &&
             rintls_memcmp(chain_top->raw_data, trusted->raw_data,
                           chain_top->raw_len) == 0) {
+            return 1;
+        }
+
+        if (x509_trust_identity_matches(chain_top, trusted)) {
             return 1;
         }
 
@@ -76,6 +84,21 @@ static int rintls_verify_chain_top(void* opaque, const x509_cert_t* chain_top)
             x509_verify_signature(chain_top, trusted) == X509_OK) {
             return 1;
         }
+    }
+    return 0;
+}
+
+static int rintls_verify_chain_top(void* opaque, const x509_cert_t* chain_top)
+{
+    rintls_ctx* ctx = (rintls_ctx*)opaque;
+    if (!ctx || !chain_top) return 0;
+
+    if (rintls_verify_against_anchors(ctx->trust_anchors, chain_top))
+        return 1;
+    if (ctx->shared_trust_store &&
+        rintls_verify_against_anchors(ctx->shared_trust_store->trust_anchors,
+                                      chain_top)) {
+        return 1;
     }
     return 0;
 }
@@ -186,11 +209,8 @@ int rintls_set_options(rintls_ctx* ctx, u32 options)
     return RINTLS_OK;
 }
 
-void rintls_clear_trust_anchors(rintls_ctx* ctx)
+static void rintls_free_anchor_list(rintls_trust_anchor* anchor)
 {
-    rintls_trust_anchor* anchor;
-    if (!ctx) return;
-    anchor = ctx->trust_anchors;
     while (anchor) {
         rintls_trust_anchor* next = anchor->next;
         x509_cert_clear(&anchor->certificate);
@@ -202,28 +222,62 @@ void rintls_clear_trust_anchors(rintls_ctx* ctx)
         rintls_mem_free(anchor);
         anchor = next;
     }
+}
+
+void rintls_trust_store_retain(rintls_trust_store* store)
+{
+    if (!store) return;
+    (void)__atomic_add_fetch(&store->reference_count, 1u, __ATOMIC_RELAXED);
+}
+
+void rintls_trust_store_release(rintls_trust_store* store)
+{
+    if (!store) return;
+    if (__atomic_sub_fetch(&store->reference_count, 1u, __ATOMIC_ACQ_REL) != 0)
+        return;
+    rintls_free_anchor_list(store->trust_anchors);
+    rintls_secure_zero(store, sizeof(*store));
+    rintls_mem_free(store);
+}
+
+u32 rintls_trust_store_anchor_count(const rintls_trust_store* store)
+{
+    return store ? store->trust_anchor_count : 0;
+}
+
+void rintls_clear_trust_anchors(rintls_ctx* ctx)
+{
+    if (!ctx) return;
+    rintls_free_anchor_list(ctx->trust_anchors);
     ctx->trust_anchors = RIN_NULL;
     ctx->trust_anchor_count = 0;
+    if (ctx->shared_trust_store) {
+        rintls_trust_store_release(ctx->shared_trust_store);
+        ctx->shared_trust_store = RIN_NULL;
+    }
     tls_handshake_set_trust_anchor_verifier(&ctx->handshake, 0, RIN_NULL);
 }
 
 u32 rintls_trust_anchor_count(rintls_ctx* ctx)
 {
-    return ctx ? ctx->trust_anchor_count : 0;
+    if (!ctx) return 0;
+    return ctx->trust_anchor_count +
+           rintls_trust_store_anchor_count(ctx->shared_trust_store);
 }
 
-int rintls_add_trust_anchor_der(rintls_ctx* ctx,
-                                const void* certificate_der,
-                                rin_size_t certificate_len)
+static int rintls_add_anchor_to_list(rintls_trust_anchor** list,
+                                     u32* count,
+                                     const void* certificate_der,
+                                     rin_size_t certificate_len)
 {
     const u8* source = (const u8*)certificate_der;
     rintls_trust_anchor* anchor;
-    if (!ctx || !source || certificate_len == 0 || certificate_len > 65535u) {
+    if (!list || !count || !source || certificate_len == 0 ||
+        certificate_len > 65535u) {
         return RINTLS_ERR_CERTIFICATE;
     }
-    if (ctx->trust_anchor_count >= RINTLS_MAX_TRUST_ANCHORS) {
+    if (*count >= RINTLS_MAX_TRUST_ANCHORS)
         return RINTLS_ERR_MEMORY;
-    }
 
     anchor = (rintls_trust_anchor*)rintls_malloc(sizeof(*anchor));
     if (!anchor) return RINTLS_ERR_MEMORY;
@@ -246,24 +300,42 @@ int rintls_add_trust_anchor_der(rintls_ctx* ctx,
         return RINTLS_ERR_CERTIFICATE;
     }
 
-    anchor->next = ctx->trust_anchors;
-    ctx->trust_anchors = anchor;
-    ctx->trust_anchor_count++;
+    anchor->next = *list;
+    *list = anchor;
+    (*count)++;
+    return RINTLS_OK;
+}
+
+int rintls_add_trust_anchor_der(rintls_ctx* ctx,
+                                const void* certificate_der,
+                                rin_size_t certificate_len)
+{
+    int result;
+    if (!ctx) return RINTLS_ERR_CERTIFICATE;
+    if (rintls_trust_anchor_count(ctx) >= RINTLS_MAX_TRUST_ANCHORS)
+        return RINTLS_ERR_MEMORY;
+    result = rintls_add_anchor_to_list(&ctx->trust_anchors,
+                                       &ctx->trust_anchor_count,
+                                       certificate_der, certificate_len);
+    if (result != RINTLS_OK) return result;
     tls_handshake_set_trust_anchor_verifier(&ctx->handshake,
                                              rintls_verify_chain_top,
                                              ctx);
     return RINTLS_OK;
 }
 
-int rintls_load_trust_store(rintls_ctx* ctx,
-                            const void* bundle,
-                            rin_size_t bundle_len)
+int rintls_trust_store_from_bundle(const void* bundle,
+                                   rin_size_t bundle_len,
+                                   rintls_trust_store** store_out)
 {
     const u8* bytes = (const u8*)bundle;
     rin_size_t offset = 8;
+    rintls_trust_store* store;
+    int failure = RINTLS_ERR_CERTIFICATE;
     u32 count;
     u32 i;
-    if (!ctx || !bytes || bundle_len < 8 ||
+    if (store_out) *store_out = RIN_NULL;
+    if (!store_out || !bytes || bundle_len < 8 ||
         bundle_len > RINTLS_MAX_TRUST_BUNDLE_BYTES ||
         bytes[0] != 'R' || bytes[1] != 'C' ||
         bytes[2] != 'A' || bytes[3] != '1') {
@@ -274,7 +346,11 @@ int rintls_load_trust_store(rintls_ctx* ctx,
         return RINTLS_ERR_CERTIFICATE;
     }
 
-    rintls_clear_trust_anchors(ctx);
+    store = (rintls_trust_store*)rintls_malloc(sizeof(*store));
+    if (!store) return RINTLS_ERR_MEMORY;
+    rintls_memset(store, 0, sizeof(*store));
+    store->reference_count = 1;
+
     for (i = 0; i < count; ++i) {
         u32 der_len;
         int result;
@@ -282,16 +358,50 @@ int rintls_load_trust_store(rintls_ctx* ctx,
         der_len = rintls_read_le32(bytes + offset);
         offset += 4;
         if (der_len == 0 || der_len > bundle_len - offset) goto invalid;
-        result = rintls_add_trust_anchor_der(ctx, bytes + offset, der_len);
-        if (result != RINTLS_OK) goto invalid;
+        result = rintls_add_anchor_to_list(&store->trust_anchors,
+                                           &store->trust_anchor_count,
+                                           bytes + offset, der_len);
+        if (result != RINTLS_OK) {
+            failure = result;
+            goto invalid;
+        }
         offset += der_len;
     }
     if (offset != bundle_len) goto invalid;
+    *store_out = store;
     return RINTLS_OK;
 
 invalid:
+    rintls_trust_store_release(store);
+    return failure;
+}
+
+int rintls_set_trust_store(rintls_ctx* ctx, rintls_trust_store* store)
+{
+    if (!ctx || !store || store->trust_anchor_count == 0)
+        return RINTLS_ERR_CERTIFICATE;
+
+    rintls_trust_store_retain(store);
     rintls_clear_trust_anchors(ctx);
-    return RINTLS_ERR_CERTIFICATE;
+    ctx->shared_trust_store = store;
+    tls_handshake_set_trust_anchor_verifier(&ctx->handshake,
+                                             rintls_verify_chain_top,
+                                             ctx);
+    return RINTLS_OK;
+}
+
+int rintls_load_trust_store(rintls_ctx* ctx,
+                            const void* bundle,
+                            rin_size_t bundle_len)
+{
+    rintls_trust_store* store = RIN_NULL;
+    int result;
+    if (!ctx) return RINTLS_ERR_CERTIFICATE;
+    result = rintls_trust_store_from_bundle(bundle, bundle_len, &store);
+    if (result != RINTLS_OK) return result;
+    result = rintls_set_trust_store(ctx, store);
+    rintls_trust_store_release(store);
+    return result;
 }
 
 /* ═══════════════════════════════════════
@@ -422,8 +532,14 @@ int rintls_handshake_step(rintls_ctx* ctx)
     case TLS_HS_ERR_SIGNATURE:
         ctx->last_error = RINTLS_ERR_CERTIFICATE;
         break;
-    case TLS_HS_ERR_VERIFY:
+    case TLS_HS_ERR_HOSTNAME:
         ctx->last_error = RINTLS_ERR_HOSTNAME;
+        break;
+    case TLS_HS_ERR_TRUST:
+        ctx->last_error = RINTLS_ERR_TRUST;
+        break;
+    case TLS_HS_ERR_VERIFY:
+        ctx->last_error = RINTLS_ERR_HANDSHAKE;
         break;
     default:
         ctx->last_error = RINTLS_ERR_HANDSHAKE;
@@ -582,8 +698,10 @@ const char* rintls_strerror(int error)
     case RINTLS_ERR_CLOSED:     return "Connection closed";
     case RINTLS_ERR_VERSION:    return "TLS version not supported";
     case RINTLS_ERR_DECRYPT:    return "Decryption failed";
+    case RINTLS_ERR_RANDOM:     return "Secure random generation failed";
     case RINTLS_ERR_WANT_READ:  return "Need more readable socket data";
     case RINTLS_ERR_WANT_WRITE: return "Need writable socket";
+    case RINTLS_ERR_TRUST:      return "No trusted certificate anchor";
     default:                    return "Unknown error";
     }
 }

@@ -337,7 +337,8 @@ static int parse_public_key(x509_cert_t* cert, const u8** p, const u8* end)
         rin_size_t e_len;
         if (asn1_read_integer(p, rsa_end, e, &e_len, sizeof(e)) < 0) return -1;
 
-        rsa_pubkey_set(&cert->pubkey.rsa, n, n_len, e, e_len);
+        if (rsa_pubkey_set(&cert->pubkey.rsa, n, n_len, e, e_len) != RSA_OK)
+            return X509_ERR_PARSE;
 
     } else if (cert->key_type == X509_KEY_ECDSA) {
         /* ECポイント (非圧縮形式: 0x04 || x || y) */
@@ -792,6 +793,37 @@ int x509_check_hostname(const x509_cert_t* cert, const char* hostname)
     }
 
     return X509_ERR_NAME;
+}
+
+int x509_trust_identity_matches(const x509_cert_t* candidate,
+                                const x509_cert_t* trusted)
+{
+    if (!candidate || !trusted || !candidate->is_ca || !trusted->is_ca ||
+        !candidate->subject_name || !trusted->subject_name ||
+        candidate->subject_name_len == 0 ||
+        candidate->subject_name_len != trusted->subject_name_len ||
+        rintls_memcmp(candidate->subject_name, trusted->subject_name,
+                      candidate->subject_name_len) != 0 ||
+        candidate->key_type != trusted->key_type) {
+        return 0;
+    }
+
+    if (candidate->key_type == X509_KEY_RSA) {
+        return candidate->pubkey.rsa.bits == trusted->pubkey.rsa.bits &&
+               bn_cmp(&candidate->pubkey.rsa.n, &trusted->pubkey.rsa.n) == 0 &&
+               bn_cmp(&candidate->pubkey.rsa.e, &trusted->pubkey.rsa.e) == 0;
+    }
+
+    if (candidate->key_type == X509_KEY_ECDSA) {
+        return candidate->pubkey.ecdsa.curve == trusted->pubkey.ecdsa.curve &&
+               candidate->pubkey.ecdsa.point_len == trusted->pubkey.ecdsa.point_len &&
+               candidate->pubkey.ecdsa.point_len != 0 &&
+               rintls_memcmp(candidate->pubkey.ecdsa.point,
+                             trusted->pubkey.ecdsa.point,
+                             candidate->pubkey.ecdsa.point_len) == 0;
+    }
+
+    return 0;
 }
 
 int x509_verify_chain(x509_cert_t* certs, int cert_count, const char* hostname)
