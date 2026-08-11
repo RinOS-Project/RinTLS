@@ -5,6 +5,7 @@
 
 #include "ecdh.h"
 #include "bignum.h"
+#include "hmac.h"
 #include "../platform/rin_platform.h"
 
 /* ═══════════════════════════════════════
@@ -614,6 +615,21 @@ static void p256_get_n(bignum_t* n)
     bn_from_bytes(n, P256_N, 32);
 }
 
+int p256_validate_private(const u8* private_key, rin_size_t len)
+{
+    bignum_t private_value;
+    bignum_t order;
+    int valid;
+    if (!private_key || len != P256_KEY_SIZE) return ECDH_ERR_INVALID;
+    bn_from_bytes(&private_value, private_key, P256_KEY_SIZE);
+    p256_get_n(&order);
+    valid = !bn_is_zero(&private_value) &&
+            bn_cmp(&private_value, &order) < 0;
+    bn_clear(&private_value);
+    bn_clear(&order);
+    return valid ? ECDH_OK : ECDH_ERR_KEY;
+}
+
 /* 点のダブリング: R = 2P */
 static void p256_double(p256_point_t* r, const p256_point_t* p, const bignum_t* prime)
 {
@@ -771,6 +787,10 @@ int p256_compute_public(u8* public_key, const u8* private_key)
     bignum_t k, prime;
     p256_point_t G, Q;
 
+    if (!public_key ||
+        p256_validate_private(private_key, P256_KEY_SIZE) != ECDH_OK)
+        return ECDH_ERR_KEY;
+
     p256_get_p(&prime);
 
     bn_from_bytes(&G.x, P256_GX, 32);
@@ -872,6 +892,174 @@ int p256_ecdh(u8* shared_secret,
 /* ═══════════════════════════════════════
  * ECDSA P-256 署名検証
  * ═══════════════════════════════════════ */
+
+static void p256_rfc6979_hmac(u8 output[32], const u8 key[32],
+                              const u8* first, rin_size_t first_size,
+                              const u8* second, rin_size_t second_size,
+                              const u8* third, rin_size_t third_size,
+                              const u8* fourth, rin_size_t fourth_size)
+{
+    hmac_sha256_ctx hmac;
+    hmac_sha256_init(&hmac, key, 32u);
+    if (first_size != 0u) hmac_sha256_update(&hmac, first, first_size);
+    if (second_size != 0u) hmac_sha256_update(&hmac, second, second_size);
+    if (third_size != 0u) hmac_sha256_update(&hmac, third, third_size);
+    if (fourth_size != 0u) hmac_sha256_update(&hmac, fourth, fourth_size);
+    hmac_sha256_final(&hmac, output);
+    rintls_secure_zero(&hmac, sizeof(hmac));
+}
+
+static void p256_rfc6979_reject(u8 key[32], u8 value[32])
+{
+    static const u8 zero = 0u;
+    u8 next_key[32];
+    u8 next_value[32];
+    p256_rfc6979_hmac(next_key, key, value, 32u, &zero, 1u,
+                      NULL, 0u, NULL, 0u);
+    p256_rfc6979_hmac(next_value, next_key, value, 32u, NULL, 0u,
+                      NULL, 0u, NULL, 0u);
+    rintls_memcpy(key, next_key, sizeof(next_key));
+    rintls_memcpy(value, next_value, sizeof(next_value));
+    rintls_secure_zero(next_key, sizeof(next_key));
+    rintls_secure_zero(next_value, sizeof(next_value));
+}
+
+static int p256_rfc6979_init(u8 key[32], u8 value[32],
+                             const u8 private_key[32],
+                             const u8 hash[32])
+{
+    static const u8 zero = 0u;
+    static const u8 one = 1u;
+    bignum_t hash_value;
+    bignum_t order;
+    bignum_t reduced_hash;
+    u8 hash_octets[32];
+    u8 next_key[32];
+    u8 next_value[32];
+    int result = ECDH_ERR_INVALID;
+    rintls_memset(hash_octets, 0, sizeof(hash_octets));
+    rintls_memset(next_key, 0, sizeof(next_key));
+    rintls_memset(next_value, 0, sizeof(next_value));
+    bn_from_bytes(&hash_value, hash, 32u);
+    p256_get_n(&order);
+    if (bn_mod(&reduced_hash, &hash_value, &order) != BIGNUM_OK ||
+        bn_to_bytes(&reduced_hash, hash_octets, sizeof(hash_octets)) !=
+            BIGNUM_OK)
+        goto done;
+
+    rintls_memset(key, 0, 32u);
+    rintls_memset(value, 1, 32u);
+    p256_rfc6979_hmac(next_key, key, value, 32u, &zero, 1u,
+                      private_key, 32u, hash_octets, 32u);
+    rintls_memcpy(key, next_key, 32u);
+    p256_rfc6979_hmac(next_value, key, value, 32u, NULL, 0u,
+                      NULL, 0u, NULL, 0u);
+    rintls_memcpy(value, next_value, 32u);
+    p256_rfc6979_hmac(next_key, key, value, 32u, &one, 1u,
+                      private_key, 32u, hash_octets, 32u);
+    rintls_memcpy(key, next_key, 32u);
+    p256_rfc6979_hmac(next_value, key, value, 32u, NULL, 0u,
+                      NULL, 0u, NULL, 0u);
+    rintls_memcpy(value, next_value, 32u);
+    result = ECDH_OK;
+done:
+    bn_clear(&hash_value);
+    bn_clear(&order);
+    bn_clear(&reduced_hash);
+    rintls_secure_zero(hash_octets, sizeof(hash_octets));
+    rintls_secure_zero(next_key, sizeof(next_key));
+    rintls_secure_zero(next_value, sizeof(next_value));
+    return result;
+}
+
+int ecdsa_p256_sign(u8 signature[64], const u8 hash[32],
+                    const u8 private_key[32])
+{
+    bignum_t private_value;
+    bignum_t hash_value;
+    bignum_t order;
+    bignum_t prime;
+    bignum_t nonce;
+    bignum_t nonce_inverse;
+    bignum_t r;
+    bignum_t s;
+    bignum_t product;
+    bignum_t sum;
+    p256_point_t generator;
+    p256_point_t nonce_point;
+    u8 key[32];
+    u8 value[32];
+    u32 attempts = 0u;
+    int result = ECDH_ERR_KEY;
+    if (signature) rintls_secure_zero(signature, 64u);
+    rintls_memset(key, 0, sizeof(key));
+    rintls_memset(value, 0, sizeof(value));
+    if (!signature || !hash ||
+        p256_validate_private(private_key, P256_KEY_SIZE) != ECDH_OK)
+        goto done;
+    if (p256_rfc6979_init(key, value, private_key, hash) != ECDH_OK)
+        goto done;
+
+    bn_from_bytes(&private_value, private_key, 32u);
+    bn_from_bytes(&hash_value, hash, 32u);
+    p256_get_n(&order);
+    p256_get_p(&prime);
+    bn_from_bytes(&generator.x, P256_GX, 32u);
+    bn_from_bytes(&generator.y, P256_GY, 32u);
+    generator.infinity = 0;
+    while (attempts++ < 128u) {
+        p256_rfc6979_hmac(value, key, value, 32u, NULL, 0u,
+                          NULL, 0u, NULL, 0u);
+        bn_from_bytes(&nonce, value, 32u);
+        if (bn_is_zero(&nonce) || bn_cmp(&nonce, &order) >= 0) {
+            p256_rfc6979_reject(key, value);
+            continue;
+        }
+        p256_scalar_mult(&nonce_point, &nonce, &generator, &prime);
+        if (nonce_point.infinity ||
+            bn_mod(&r, &nonce_point.x, &order) != BIGNUM_OK ||
+            bn_is_zero(&r) ||
+            bn_mod_inv(&nonce_inverse, &nonce, &order) != BIGNUM_OK ||
+            bn_mod_mul(&product, &r, &private_value, &order) !=
+                BIGNUM_OK ||
+            bn_mod_add(&sum, &hash_value, &product, &order) !=
+                BIGNUM_OK ||
+            bn_mod_mul(&s, &nonce_inverse, &sum, &order) !=
+                BIGNUM_OK ||
+            bn_is_zero(&s)) {
+            p256_rfc6979_reject(key, value);
+            continue;
+        }
+        if (bn_to_bytes(&r, signature, 32u) != BIGNUM_OK ||
+            bn_to_bytes(&s, signature + 32u, 32u) != BIGNUM_OK) {
+            rintls_secure_zero(signature, 64u);
+            result = ECDH_ERR_INVALID;
+            goto done;
+        }
+        result = ECDH_OK;
+        goto done;
+    }
+done:
+    bn_clear(&private_value);
+    bn_clear(&hash_value);
+    bn_clear(&order);
+    bn_clear(&prime);
+    bn_clear(&nonce);
+    bn_clear(&nonce_inverse);
+    bn_clear(&r);
+    bn_clear(&s);
+    bn_clear(&product);
+    bn_clear(&sum);
+    bn_clear(&generator.x);
+    bn_clear(&generator.y);
+    bn_clear(&nonce_point.x);
+    bn_clear(&nonce_point.y);
+    rintls_secure_zero(key, sizeof(key));
+    rintls_secure_zero(value, sizeof(value));
+    if (result != ECDH_OK && signature)
+        rintls_secure_zero(signature, 64u);
+    return result;
+}
 
 int ecdsa_sig_from_der(u8* r, u8* s, const u8* der, rin_size_t der_len)
 {

@@ -57,6 +57,9 @@ int p256_keygen(p256_keypair_t* keypair);
 /* P-256秘密鍵から公開鍵を計算 */
 int p256_compute_public(u8* public_key, const u8* private_key);
 
+/* 1 <= private_key < curve order. */
+int p256_validate_private(const u8* private_key, rin_size_t len);
+
 /*
  * P-256 ECDH共有秘密を計算
  * shared_secret: 出力 (32バイト)
@@ -83,6 +86,11 @@ int p256_validate_public(const u8* public_key, rin_size_t len);
 int ecdsa_p256_verify(const u8* signature, rin_size_t sig_len,
                       const u8* hash, rin_size_t hash_len,
                       const u8* public_key, rin_size_t pubkey_len);
+
+/* Deterministic RFC 6979 ECDSA over a 32-byte SHA-256 digest.
+ * The signature is the fixed-width IEEE P1363 r || s form. */
+int ecdsa_p256_sign(u8 signature[64], const u8 hash[32],
+                    const u8 private_key[32]);
 
 /* Verify an ECDSA signature using an uncompressed NIST P-256/P-384/P-521 key. */
 int ecdsa_nist_verify(int curve,
