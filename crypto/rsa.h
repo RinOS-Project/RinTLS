@@ -131,6 +131,30 @@ int rsa_pkcs1_encrypt(u8* output, rin_size_t* output_len,
                       const rsa_pubkey_t* key);
 
 /* ═══════════════════════════════════════
+ * RSA-OAEP encryption (SHA-256 / MGF1-SHA-256)
+ * ═══════════════════════════════════════ */
+
+typedef int (*rsa_random_bytes_fn)(void* context, u8* output,
+                                   rin_size_t output_len);
+
+/* output_len is an in/out parameter: the caller supplies output capacity and
+ * receives the exact RSA ciphertext size. The deterministic callback form is
+ * intended for platform CSPRNG adapters and known-answer tests. */
+int rsa_oaep_sha256_encrypt_with_rng(
+    u8* output, rin_size_t* output_len,
+    const u8* input, rin_size_t input_len,
+    const u8* label, rin_size_t label_len,
+    const rsa_pubkey_t* key,
+    rsa_random_bytes_fn random_bytes, void* random_context);
+
+/* Uses the mandatory platform random source and never falls back to rand(). */
+int rsa_oaep_sha256_encrypt(
+    u8* output, rin_size_t* output_len,
+    const u8* input, rin_size_t input_len,
+    const u8* label, rin_size_t label_len,
+    const rsa_pubkey_t* key);
+
+/* ═══════════════════════════════════════
  * DigestInfo構造 (PKCS#1 署名用)
  * ═══════════════════════════════════════ */
 

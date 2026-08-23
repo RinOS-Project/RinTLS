@@ -143,6 +143,10 @@ typedef struct {
     tls_trust_anchor_verify_func trust_anchor_verify;
     void* trust_anchor_opaque;
 
+    /* Nonzero only when the caller supplied authenticated wall-clock state
+     * before the first handshake step. */
+    u64 trusted_unix_time;
+
     /* ネゴシエートされた値 */
     u16 version;
     u16 cipher_suite;
@@ -227,6 +231,9 @@ void tls_handshake_set_server_name(tls_handshake_ctx_t* ctx, const char* name);
 void tls_handshake_set_trust_anchor_verifier(tls_handshake_ctx_t* ctx,
                                              tls_trust_anchor_verify_func verify,
                                              void* opaque);
+
+void tls_handshake_set_trusted_time(tls_handshake_ctx_t* ctx,
+                                    u64 trusted_unix_time);
 
 /* ═══════════════════════════════════════
  * ハンドシェイク実行

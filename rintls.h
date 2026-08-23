@@ -40,6 +40,25 @@ extern "C" {
 #define RINTLS_ERR_WANT_WRITE   -11
 #define RINTLS_ERR_TRUST        -12
 
+#define RINTLS_PEER_EVIDENCE_VERSION 0x00010000u
+#define RINTLS_PEER_EVIDENCE_CHAIN_VERIFIED 0x00000001u
+#define RINTLS_PEER_EVIDENCE_HOSTNAME_VERIFIED 0x00000002u
+#define RINTLS_PEER_EVIDENCE_TRUSTED_TIME 0x00000004u
+#define RINTLS_PEER_EVIDENCE_REQUIRED 0x00000007u
+
+typedef struct rintls_peer_evidence {
+    u32 struct_size;
+    u32 version;
+    u32 evidence_flags;
+    u32 tls_version;
+    u32 cipher_suite;
+    u32 reserved0;
+    u64 trusted_unix_time;
+    u8 peer_certificate_sha256[32];
+    char peer_dns_name[256];
+    u64 reserved[2];
+} rintls_peer_evidence;
+
 /* ═══════════════════════════════════════
  * オプションフラグ
  * ═══════════════════════════════════════ */
@@ -118,6 +137,10 @@ int rintls_set_io(rintls_ctx* ctx,
  * options: RINTLS_OPT_* フラグの組み合わせ
  */
 int rintls_set_options(rintls_ctx* ctx, u32 options);
+
+/* Bind authenticated wall-clock state to this handshake.  Configuration is
+ * immutable after the first handshake step. */
+int rintls_set_trusted_time(rintls_ctx* ctx, u64 trusted_unix_time);
 
 /* Add one DER-encoded CA certificate to this context's trust store. */
 int rintls_add_trust_anchor_der(rintls_ctx* ctx,
@@ -205,6 +228,11 @@ u16 rintls_get_cipher_suite(rintls_ctx* ctx);
  * 最後のエラーを取得
  */
 int rintls_get_error(rintls_ctx* ctx);
+
+/* Returns evidence only for a completed, default-verification handshake that
+ * used a hostname, a non-empty trust store, and explicit trusted time. */
+int rintls_get_peer_evidence(rintls_ctx* ctx,
+                             rintls_peer_evidence* evidence);
 
 /*
  * エラーメッセージを取得

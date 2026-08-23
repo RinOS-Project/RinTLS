@@ -63,9 +63,11 @@ int rsa_pubkey_set(rsa_pubkey_t* key,
                    const u8* n, rin_size_t n_len,
                    const u8* e, rin_size_t e_len)
 {
-    if (!key || !n || !e) {
+    if (!key) {
         return RSA_ERR_KEY;
     }
+    rsa_pubkey_clear(key);
+    if (!n || !e) return RSA_ERR_KEY;
 
     /* 先頭のゼロをスキップ */
     while (n_len > 0 && *n == 0) {
@@ -83,14 +85,22 @@ int rsa_pubkey_set(rsa_pubkey_t* key,
     }
 
     if (bn_from_bytes(&key->n, n, n_len) != BIGNUM_OK) {
-        return RSA_ERR_KEY;
+        goto invalid_key;
     }
     if (bn_from_bytes(&key->e, e, e_len) != BIGNUM_OK) {
-        return RSA_ERR_KEY;
+        goto invalid_key;
     }
 
     key->bits = bn_bitlen(&key->n);
+    if (key->bits < 512 || key->bits > BIGNUM_MAX_BITS ||
+        !bn_is_odd(&key->n) || !bn_is_odd(&key->e) ||
+        bn_cmp_u32(&key->e, 3) < 0)
+        goto invalid_key;
     return RSA_OK;
+
+invalid_key:
+    rsa_pubkey_clear(key);
+    return RSA_ERR_KEY;
 }
 
 /* ═══════════════════════════════════════
@@ -137,39 +147,60 @@ static int der_read_tag(const u8** p, const u8* end, u8 expected)
  */
 int rsa_pubkey_from_der(rsa_pubkey_t* key, const u8* der, rin_size_t len)
 {
-    const u8* p = der;
-    const u8* end = der + len;
+    const u8* p;
+    const u8* end;
+    const u8* sequence_end;
     rin_size_t seq_len, int_len;
 
+    if (!key || !der || len == 0) return RSA_ERR_INVALID;
+    p = der;
+    end = der + len;
     rsa_pubkey_init(key);
 
     /* SEQUENCE */
     if (der_read_tag(&p, end, 0x30) < 0) return RSA_ERR_INVALID;
     if (der_read_length(&p, end, &seq_len) < 0) return RSA_ERR_INVALID;
+    if (seq_len > (rin_size_t)(end - p)) return RSA_ERR_INVALID;
+    sequence_end = p + seq_len;
+    if (sequence_end != end) return RSA_ERR_INVALID;
 
     /* modulus INTEGER */
-    if (der_read_tag(&p, end, 0x02) < 0) return RSA_ERR_INVALID;
-    if (der_read_length(&p, end, &int_len) < 0) return RSA_ERR_INVALID;
+    if (der_read_tag(&p, sequence_end, 0x02) < 0) return RSA_ERR_INVALID;
+    if (der_read_length(&p, sequence_end, &int_len) < 0 || int_len == 0 ||
+        int_len > (rin_size_t)(sequence_end - p))
+        return RSA_ERR_INVALID;
 
     /* 先頭の0x00（符号バイト）をスキップ */
     const u8* n_data = p;
     rin_size_t n_len = int_len;
-    if (n_len > 0 && *n_data == 0x00) {
+    if (*n_data == 0x00) {
+        if (n_len == 1 || (n_data[1] & 0x80) == 0)
+            return RSA_ERR_INVALID;
         n_data++;
         n_len--;
+    } else if ((*n_data & 0x80) != 0) {
+        return RSA_ERR_INVALID;
     }
     p += int_len;
 
     /* publicExponent INTEGER */
-    if (der_read_tag(&p, end, 0x02) < 0) return RSA_ERR_INVALID;
-    if (der_read_length(&p, end, &int_len) < 0) return RSA_ERR_INVALID;
+    if (der_read_tag(&p, sequence_end, 0x02) < 0) return RSA_ERR_INVALID;
+    if (der_read_length(&p, sequence_end, &int_len) < 0 || int_len == 0 ||
+        int_len > (rin_size_t)(sequence_end - p))
+        return RSA_ERR_INVALID;
 
     const u8* e_data = p;
     rin_size_t e_len = int_len;
-    if (e_len > 0 && *e_data == 0x00) {
+    if (*e_data == 0x00) {
+        if (e_len == 1 || (e_data[1] & 0x80) == 0)
+            return RSA_ERR_INVALID;
         e_data++;
         e_len--;
+    } else if ((*e_data & 0x80) != 0) {
+        return RSA_ERR_INVALID;
     }
+    p += int_len;
+    if (p != sequence_end) return RSA_ERR_INVALID;
 
     return rsa_pubkey_set(key, n_data, n_len, e_data, e_len);
 }
@@ -183,35 +214,50 @@ int rsa_public(u8* result, rin_size_t* result_len,
                const rsa_pubkey_t* key)
 {
     bignum_t m, c;
-    rin_size_t key_bytes = (key->bits + 7) / 8;
+    rin_size_t key_bytes;
+    int status = RSA_ERR_INVALID;
+    bn_init(&m);
+    bn_init(&c);
+    if (result_len) *result_len = 0;
+    if (!result || !result_len || !message || !key || message_len == 0 ||
+        key->bits < 512 || key->bits > BIGNUM_MAX_BITS ||
+        key->bits != bn_bitlen(&key->n) || !bn_is_odd(&key->n) ||
+        !bn_is_odd(&key->e) || bn_cmp_u32(&key->e, 3) < 0)
+        goto cleanup;
+    key_bytes = (key->bits + 7) / 8;
+    if (message_len > key_bytes) {
+        status = RSA_ERR_SIZE;
+        goto cleanup;
+    }
 
     /* メッセージを数値に変換 */
     if (bn_from_bytes(&m, message, message_len) != BIGNUM_OK) {
-        return RSA_ERR_INVALID;
+        goto cleanup;
     }
 
     /* m >= n のチェック */
     if (bn_cmp(&m, &key->n) >= 0) {
-        return RSA_ERR_SIZE;
+        status = RSA_ERR_SIZE;
+        goto cleanup;
     }
 
     /* c = m^e mod n */
     if (bn_mod_exp(&c, &m, &key->e, &key->n) != BIGNUM_OK) {
-        return RSA_ERR_INVALID;
+        goto cleanup;
     }
 
     /* 結果をバイト配列に変換 */
     if (bn_to_bytes(&c, result, key_bytes) != BIGNUM_OK) {
-        return RSA_ERR_INVALID;
+        goto cleanup;
     }
 
     *result_len = key_bytes;
+    status = RSA_OK;
 
-    /* クリーンアップ */
+cleanup:
     bn_clear(&m);
     bn_clear(&c);
-
-    return RSA_OK;
+    return status;
 }
 
 /* ═══════════════════════════════════════
@@ -227,7 +273,12 @@ int rsa_pkcs1_verify(const u8* signature, rin_size_t sig_len,
     rin_size_t decrypted_len;
     const u8* digest_info;
     rin_size_t digest_info_len;
-    rin_size_t key_bytes = (key->bits + 7) / 8;
+    rin_size_t key_bytes;
+
+    if (!signature || !hash || !key || key->bits < 512 ||
+        key->bits > BIGNUM_MAX_BITS)
+        return RSA_ERR_INVALID;
+    key_bytes = (key->bits + 7) / 8;
 
     /* DigestInfoを選択 */
     switch (hash_alg) {
@@ -284,7 +335,7 @@ int rsa_pkcs1_verify(const u8* signature, rin_size_t sig_len,
 
     /* 0xFFパディングをスキップ */
     rin_size_t ff_count = 0;
-    while (*p == 0xFF && p < decrypted + decrypted_len) {
+    while (p < decrypted + decrypted_len && *p == 0xFF) {
         p++;
         ff_count++;
     }
@@ -295,7 +346,7 @@ int rsa_pkcs1_verify(const u8* signature, rin_size_t sig_len,
     }
 
     /* 0x00区切り */
-    if (*p != 0x00) {
+    if (p >= decrypted + decrypted_len || *p != 0x00) {
         return RSA_ERR_PADDING;
     }
     p++;
@@ -357,16 +408,132 @@ static void mgf1_sha256(u8* mask, rin_size_t mask_len,
     rintls_secure_zero(hash, sizeof(hash));
 }
 
+static int rsa_oaep_default_random(void* context, u8* output,
+                                   rin_size_t output_len)
+{
+    (void)context;
+    return rintls_random_bytes(output, output_len);
+}
+
+int rsa_oaep_sha256_encrypt_with_rng(
+    u8* output, rin_size_t* output_len,
+    const u8* input, rin_size_t input_len,
+    const u8* label, rin_size_t label_len,
+    const rsa_pubkey_t* key,
+    rsa_random_bytes_fn random_bytes, void* random_context)
+{
+    u8 encoded[RSA_MAX_KEY_SIZE];
+    u8 data_block[RSA_MAX_KEY_SIZE];
+    u8 data_mask[RSA_MAX_KEY_SIZE];
+    u8 seed[SHA256_DIGEST_SIZE];
+    u8 seed_mask[SHA256_DIGEST_SIZE];
+    u8 label_hash[SHA256_DIGEST_SIZE];
+    u8 ciphertext[RSA_MAX_KEY_SIZE];
+    rin_size_t output_capacity = output_len ? *output_len : 0;
+    rin_size_t key_bytes;
+    rin_size_t data_block_len;
+    rin_size_t padding_len;
+    rin_size_t ciphertext_len = 0;
+    rin_size_t i;
+    int result = RSA_ERR_INVALID;
+
+    rintls_secure_zero(encoded, sizeof(encoded));
+    rintls_secure_zero(data_block, sizeof(data_block));
+    rintls_secure_zero(data_mask, sizeof(data_mask));
+    rintls_secure_zero(seed, sizeof(seed));
+    rintls_secure_zero(seed_mask, sizeof(seed_mask));
+    rintls_secure_zero(label_hash, sizeof(label_hash));
+    rintls_secure_zero(ciphertext, sizeof(ciphertext));
+    if (output_len) *output_len = 0;
+
+    if (!output || !output_len || !key || !random_bytes ||
+        (!input && input_len != 0) || (!label && label_len != 0) ||
+        key->bits == 0 || key->bits > BIGNUM_MAX_BITS)
+        goto cleanup;
+    key_bytes = (key->bits + 7) / 8;
+    if (key_bytes > RSA_MAX_KEY_SIZE ||
+        key_bytes < 2 * SHA256_DIGEST_SIZE + 2) {
+        result = RSA_ERR_KEY;
+        goto cleanup;
+    }
+    if (output_capacity < key_bytes ||
+        input_len > key_bytes - 2 * SHA256_DIGEST_SIZE - 2) {
+        result = RSA_ERR_SIZE;
+        goto cleanup;
+    }
+
+    data_block_len = key_bytes - SHA256_DIGEST_SIZE - 1;
+    padding_len = data_block_len - SHA256_DIGEST_SIZE - input_len - 1;
+    sha256(label, label_len, label_hash);
+    rintls_memcpy(data_block, label_hash, SHA256_DIGEST_SIZE);
+    data_block[SHA256_DIGEST_SIZE + padding_len] = 0x01;
+    if (input_len != 0)
+        rintls_memcpy(data_block + data_block_len - input_len, input,
+                      input_len);
+    if (random_bytes(random_context, seed, sizeof(seed)) != 0) {
+        result = RSA_ERR_KEY;
+        goto cleanup;
+    }
+
+    mgf1_sha256(data_mask, data_block_len, seed, sizeof(seed));
+    for (i = 0; i < data_block_len; ++i)
+        encoded[1 + SHA256_DIGEST_SIZE + i] =
+            (u8)(data_block[i] ^ data_mask[i]);
+    mgf1_sha256(seed_mask, sizeof(seed_mask),
+                encoded + 1 + SHA256_DIGEST_SIZE, data_block_len);
+    for (i = 0; i < SHA256_DIGEST_SIZE; ++i)
+        encoded[1 + i] = (u8)(seed[i] ^ seed_mask[i]);
+
+    result = rsa_public(ciphertext, &ciphertext_len, encoded, key_bytes, key);
+    if (result != RSA_OK || ciphertext_len != key_bytes) {
+        if (result == RSA_OK) result = RSA_ERR_KEY;
+        goto cleanup;
+    }
+    rintls_memcpy(output, ciphertext, key_bytes);
+    *output_len = key_bytes;
+    result = RSA_OK;
+
+cleanup:
+    if (result != RSA_OK && output && output_capacity != 0 &&
+        output_capacity <= RSA_MAX_KEY_SIZE)
+        rintls_secure_zero(output, output_capacity);
+    rintls_secure_zero(encoded, sizeof(encoded));
+    rintls_secure_zero(data_block, sizeof(data_block));
+    rintls_secure_zero(data_mask, sizeof(data_mask));
+    rintls_secure_zero(seed, sizeof(seed));
+    rintls_secure_zero(seed_mask, sizeof(seed_mask));
+    rintls_secure_zero(label_hash, sizeof(label_hash));
+    rintls_secure_zero(ciphertext, sizeof(ciphertext));
+    return result;
+}
+
+int rsa_oaep_sha256_encrypt(
+    u8* output, rin_size_t* output_len,
+    const u8* input, rin_size_t input_len,
+    const u8* label, rin_size_t label_len,
+    const rsa_pubkey_t* key)
+{
+    return rsa_oaep_sha256_encrypt_with_rng(
+        output, output_len, input, input_len, label, label_len, key,
+        rsa_oaep_default_random, NULL);
+}
+
 int rsa_pss_verify_sha256(const u8* signature, rin_size_t sig_len,
                           const u8* message_hash,
                           const rsa_pubkey_t* key)
 {
     u8 em[RSA_MAX_KEY_SIZE];
     rin_size_t em_len;
-    rin_size_t key_bytes = (key->bits + 7) / 8;
-    rin_size_t em_bits = key->bits - 1;
+    rin_size_t key_bytes;
+    rin_size_t em_bits;
     rin_size_t hash_len = SHA256_DIGEST_SIZE;  /* 32 */
     rin_size_t salt_len = hash_len;  /* 通常saltLen == hashLen */
+
+    if (!signature || !message_hash || !key || key->bits < 512 ||
+        key->bits > BIGNUM_MAX_BITS)
+        return RSA_ERR_INVALID;
+    key_bytes = (key->bits + 7) / 8;
+    em_bits = key->bits - 1;
 
     /* 署名長チェック */
     if (sig_len != key_bytes) {
@@ -477,10 +644,15 @@ int rsa_pkcs1_encrypt(u8* output, rin_size_t* output_len,
                       const u8* input, rin_size_t input_len,
                       const rsa_pubkey_t* key)
 {
-    rin_size_t key_bytes = (key->bits + 7) / 8;
+    rin_size_t key_bytes;
+    if (output_len) *output_len = 0;
+    if (!output || !output_len || !key || (!input && input_len != 0) ||
+        key->bits < 512 || key->bits > BIGNUM_MAX_BITS)
+        return RSA_ERR_INVALID;
+    key_bytes = (key->bits + 7) / 8;
 
     /* メッセージ長チェック: input_len <= key_bytes - 11 */
-    if (input_len > key_bytes - 11) {
+    if (key_bytes < 11 || input_len > key_bytes - 11) {
         return RSA_ERR_SIZE;
     }
 
