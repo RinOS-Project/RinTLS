@@ -10,14 +10,15 @@
 #include "../rintls_config.h"
 
 /* Basic Types */
-#ifndef RINTLS_SKIP_BASIC_TYPEDEFS
+#if !defined(RINTLS_SKIP_BASIC_TYPEDEFS) && !defined(_RIN_TYPES_DEFINED)
+#define _RIN_TYPES_DEFINED
 #ifdef __cplusplus
 /* C++ embedders in RinOS (Ladybird/AK) already provide u8/u16/u32/u64 and signed variants. */
 #else
-#if RIN_FREESTANDING
-#if defined(RINTLS_TEST_HOST_TYPES)
-/* Freestanding failure-injection tests execute on a hosted ABI. Match the
- * provider's stdint typedefs exactly so real provider objects can link. */
+/* Fixed-width aliases must remain type-identical to the kernel headers even
+ * for a freestanding LP64 Clang syntax check.  `unsigned long long` has the
+ * right width there but is not `uint64_t`, which makes pointer interfaces
+ * incompatible. */
 #include <stdint.h>
 typedef uint8_t              u8;
 typedef uint16_t             u16;
@@ -27,28 +28,6 @@ typedef int8_t               i8;
 typedef int16_t              i16;
 typedef int32_t              i32;
 typedef int64_t              i64;
-#else
-typedef unsigned char       u8;
-typedef unsigned short      u16;
-typedef unsigned int        u32;
-typedef unsigned long long  u64;
-typedef signed char         i8;
-typedef signed short        i16;
-typedef signed int          i32;
-typedef signed long long    i64;
-#endif
-#else
-/* Do not assume that uint64_t is unsigned long long on a host ABI. */
-#include <stdint.h>
-typedef uint8_t              u8;
-typedef uint16_t             u16;
-typedef uint32_t             u32;
-typedef uint64_t             u64;
-typedef int8_t               i8;
-typedef int16_t              i16;
-typedef int32_t              i32;
-typedef int64_t              i64;
-#endif
 #endif
 #endif
 
