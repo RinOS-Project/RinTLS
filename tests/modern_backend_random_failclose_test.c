@@ -74,6 +74,17 @@ static int all_zero(const u8* bytes, size_t size)
     return combined == 0u;
 }
 
+static int all_value(const u8* bytes, size_t size, u8 value)
+{
+    size_t index;
+
+    for (index = 0; index < size; ++index) {
+        if (bytes[index] != value)
+            return 0;
+    }
+    return 1;
+}
+
 static int test_nist_entropy_failure(u32 curve, u32 hash_algorithm,
                                      rin_size_t private_size,
                                      rin_size_t public_size)
@@ -363,6 +374,153 @@ static int test_invalid_inputs_clear_known_outputs(void)
     return 0;
 }
 
+static int test_overlapping_buffers_are_rejected_without_mutation(void)
+{
+    static const u8 message[] = "overlap must not erase input";
+    static u8 nist_keygen[RINTLS_P521_PUBLIC_KEY_SIZE];
+    static u8 nist_derive[199];
+    static u8 nist_secret[199];
+    static u8 nist_sign[198];
+    static u8 nist_digest[198];
+    static u8 peer_public[RINTLS_P521_PUBLIC_KEY_SIZE];
+    static u8 digest[64];
+    static u8 ed25519_key[RINTLS_ED25519_PRIVATE_KEY_SIZE];
+    static u8 ed25519_sign[96];
+    static u8 ed448_key[RINTLS_ED448_PRIVATE_KEY_SIZE];
+    static u8 ed448_sign[171];
+    static u8 x448_key[RINTLS_X448_KEY_SIZE];
+    static u8 mldsa_keygen[4896];
+    static u8 mldsa_seed_overlap[2600];
+    static u8 mldsa_private[4896];
+    static u8 mldsa_sign[8000];
+    static u8 mldsa_seed[RINTLS_MLDSA_SEED_SIZE];
+    static u8 mlkem_seed[RINTLS_MLKEM_SEED_SIZE];
+    static u8 mlkem_keygen[3168];
+    static u8 mlkem_seed_overlap[1600];
+    static u8 mlkem_private[3168];
+    static u8 mlkem_public[1568];
+    static u8 mlkem_encapsulate[1568];
+    static u8 mlkem_shared[RINTLS_MLKEM_SHARED_SECRET_SIZE];
+    static u8 mlkem_decapsulate[3200];
+    static u8 ciphertext[1568];
+
+    test_random_mode = TEST_RANDOM_FAIL;
+    test_random_calls = 0u;
+    memset(peer_public, 0xa5, sizeof(peer_public));
+    peer_public[0] = 0x04u;
+    memset(digest, 0xa5, sizeof(digest));
+
+    memset(nist_keygen, 0xa5, sizeof(nist_keygen));
+    CHECK(rintls_nist_keygen(RINTLS_EC_P521, nist_keygen, nist_keygen) != 0);
+    CHECK(all_value(nist_keygen, sizeof(nist_keygen), 0xa5));
+    memset(nist_derive, 0xa5, sizeof(nist_derive));
+    CHECK(rintls_nist_public_from_private(RINTLS_EC_P521, nist_derive + 66u,
+                                          nist_derive) != 0);
+    CHECK(all_value(nist_derive, sizeof(nist_derive), 0xa5));
+    memset(nist_secret, 0xa5, sizeof(nist_secret));
+    CHECK(rintls_nist_ecdh(RINTLS_EC_P521, nist_secret, nist_secret + 32u,
+                           peer_public, sizeof(peer_public)) != 0);
+    CHECK(all_value(nist_secret, sizeof(nist_secret), 0xa5));
+    memset(nist_sign, 0xa5, sizeof(nist_sign));
+    CHECK(rintls_nist_ecdsa_sign(RINTLS_EC_P521, RINTLS_HASH_SHA512, message,
+                                 sizeof(message) - 1u, nist_sign + 66u,
+                                 nist_sign) != 0);
+    CHECK(all_value(nist_sign, sizeof(nist_sign), 0xa5));
+    memset(nist_digest, 0xa5, sizeof(nist_digest));
+    CHECK(rintls_nist_ecdsa_sign_digest(RINTLS_EC_P521, digest, sizeof(digest),
+                                        nist_digest + 66u, nist_digest) != 0);
+    CHECK(all_value(nist_digest, sizeof(nist_digest), 0xa5));
+
+    memset(ed25519_key, 0xa5, sizeof(ed25519_key));
+    CHECK(rintls_ed25519_keygen(ed25519_key, ed25519_key) != 0);
+    CHECK(all_value(ed25519_key, sizeof(ed25519_key), 0xa5));
+    CHECK(rintls_ed25519_public_from_private(ed25519_key, ed25519_key) != 0);
+    CHECK(all_value(ed25519_key, sizeof(ed25519_key), 0xa5));
+    memset(ed25519_sign, 0xa5, sizeof(ed25519_sign));
+    CHECK(rintls_ed25519_sign(ed25519_sign, ed25519_sign + 32u, message,
+                              sizeof(message) - 1u) != 0);
+    CHECK(all_value(ed25519_sign, sizeof(ed25519_sign), 0xa5));
+
+    memset(ed448_key, 0xa5, sizeof(ed448_key));
+    CHECK(rintls_ed448_keygen(ed448_key, ed448_key) != 0);
+    CHECK(all_value(ed448_key, sizeof(ed448_key), 0xa5));
+    CHECK(rintls_ed448_public_from_private(ed448_key, ed448_key) != 0);
+    CHECK(all_value(ed448_key, sizeof(ed448_key), 0xa5));
+    memset(ed448_sign, 0xa5, sizeof(ed448_sign));
+    CHECK(rintls_ed448_sign(ed448_sign, ed448_sign + 57u, message,
+                            sizeof(message) - 1u, NULL, 0u) != 0);
+    CHECK(all_value(ed448_sign, sizeof(ed448_sign), 0xa5));
+
+    memset(x448_key, 0xa5, sizeof(x448_key));
+    CHECK(rintls_x448_keygen(x448_key, x448_key) != 0);
+    CHECK(all_value(x448_key, sizeof(x448_key), 0xa5));
+    CHECK(rintls_x448_public_from_private(x448_key, x448_key) != 0);
+    CHECK(all_value(x448_key, sizeof(x448_key), 0xa5));
+    CHECK(rintls_x448_ecdh(x448_key, x448_key, peer_public) != 0);
+    CHECK(all_value(x448_key, sizeof(x448_key), 0xa5));
+
+    memset(mldsa_seed, 0xa5, sizeof(mldsa_seed));
+    memset(mldsa_keygen, 0xa5, sizeof(mldsa_keygen));
+    CHECK(rintls_mldsa_keygen(RINTLS_MLDSA_87, mldsa_seed, mldsa_keygen,
+                              mldsa_keygen) != 0);
+    CHECK(all_value(mldsa_seed, sizeof(mldsa_seed), 0xa5));
+    CHECK(all_value(mldsa_keygen, sizeof(mldsa_keygen), 0xa5));
+    memset(mldsa_seed_overlap, 0xa5, sizeof(mldsa_seed_overlap));
+    memset(mldsa_private, 0xa5, sizeof(mldsa_private));
+    CHECK(rintls_mldsa_keygen_from_seed(RINTLS_MLDSA_87,
+                                        mldsa_seed_overlap,
+                                        mldsa_seed_overlap,
+                                        mldsa_private) != 0);
+    CHECK(all_value(mldsa_seed_overlap, sizeof(mldsa_seed_overlap), 0xa5));
+    CHECK(all_value(mldsa_private, sizeof(mldsa_private), 0xa5));
+    memset(mldsa_private, 0xa5, sizeof(mldsa_private));
+    CHECK(rintls_mldsa_public_from_private(RINTLS_MLDSA_87, mldsa_private,
+                                            mldsa_private) != 0);
+    CHECK(all_value(mldsa_private, sizeof(mldsa_private), 0xa5));
+    memset(mldsa_sign, 0xa5, sizeof(mldsa_sign));
+    CHECK(rintls_mldsa_sign(RINTLS_MLDSA_87, mldsa_sign, message,
+                            sizeof(message) - 1u, NULL, 0u,
+                            mldsa_sign + 3000u) != 0);
+    CHECK(all_value(mldsa_sign, sizeof(mldsa_sign), 0xa5));
+
+    memset(mlkem_keygen, 0xa5, sizeof(mlkem_keygen));
+    memset(mlkem_seed, 0xa5, sizeof(mlkem_seed));
+    CHECK(rintls_mlkem_keygen(RINTLS_MLKEM_1024, mlkem_seed, mlkem_keygen,
+                              mlkem_keygen) != 0);
+    CHECK(all_value(mlkem_seed, sizeof(mlkem_seed), 0xa5));
+    CHECK(all_value(mlkem_keygen, sizeof(mlkem_keygen), 0xa5));
+    memset(mlkem_seed_overlap, 0xa5, sizeof(mlkem_seed_overlap));
+    memset(mlkem_private, 0xa5, sizeof(mlkem_private));
+    CHECK(rintls_mlkem_keygen_from_seed(RINTLS_MLKEM_1024,
+                                        mlkem_seed_overlap,
+                                        mlkem_seed_overlap,
+                                        mlkem_private) != 0);
+    CHECK(all_value(mlkem_seed_overlap, sizeof(mlkem_seed_overlap), 0xa5));
+    CHECK(all_value(mlkem_private, sizeof(mlkem_private), 0xa5));
+    memset(mlkem_private, 0xa5, sizeof(mlkem_private));
+    CHECK(rintls_mlkem_public_from_private(RINTLS_MLKEM_1024, mlkem_private,
+                                            mlkem_private) != 0);
+    CHECK(all_value(mlkem_private, sizeof(mlkem_private), 0xa5));
+    memset(mlkem_encapsulate, 0xa5, sizeof(mlkem_encapsulate));
+    memset(mlkem_shared, 0xa5, sizeof(mlkem_shared));
+    memset(mlkem_public, 0xa5, sizeof(mlkem_public));
+    CHECK(rintls_mlkem_encapsulate(RINTLS_MLKEM_1024, mlkem_encapsulate,
+                                   mlkem_shared, mlkem_encapsulate) != 0);
+    CHECK(all_value(mlkem_encapsulate, sizeof(mlkem_encapsulate), 0xa5));
+    CHECK(all_value(mlkem_shared, sizeof(mlkem_shared), 0xa5));
+    CHECK(rintls_mlkem_encapsulate(RINTLS_MLKEM_1024, mlkem_encapsulate,
+                                   mlkem_encapsulate + 32u,
+                                   mlkem_public) != 0);
+    CHECK(all_value(mlkem_encapsulate, sizeof(mlkem_encapsulate), 0xa5));
+    memset(mlkem_decapsulate, 0xa5, sizeof(mlkem_decapsulate));
+    memset(ciphertext, 0xa5, sizeof(ciphertext));
+    CHECK(rintls_mlkem_decapsulate(RINTLS_MLKEM_1024, mlkem_decapsulate,
+                                   ciphertext, mlkem_decapsulate) != 0);
+    CHECK(all_value(mlkem_decapsulate, sizeof(mlkem_decapsulate), 0xa5));
+    CHECK(test_random_calls == 0u);
+    return 0;
+}
+
 int main(void)
 {
     CHECK(test_nist_entropy_failure(RINTLS_EC_P256, RINTLS_HASH_SHA256,
@@ -382,5 +540,6 @@ int main(void)
     CHECK(test_mlkem_entropy_failure(RINTLS_MLKEM_768) == 0);
     CHECK(test_mlkem_entropy_failure(RINTLS_MLKEM_1024) == 0);
     CHECK(test_invalid_inputs_clear_known_outputs() == 0);
+    CHECK(test_overlapping_buffers_are_rejected_without_mutation() == 0);
     return 0;
 }

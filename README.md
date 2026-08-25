@@ -14,7 +14,11 @@ The native Ladybird CTest targets `rintls-modern-backend` and
 operations and forced CSPRNG failure. The latter compiles a test-only
 freestanding boundary and verifies that randomized operations clear every
 caller-visible seed/output buffer before returning an error. It does not ship
-in a RinOS image. `rintls_nist_ecdsa_sign_digest()` and
+in a RinOS image. Every modern/PQC output buffer must be disjoint from the
+operation's other non-empty buffer arguments. An overlap is rejected before
+the first write and leaves all caller storage unchanged; this prevents the
+ordinary output-zeroization policy from erasing a private key, message, or
+second result buffer. `rintls_nist_ecdsa_sign_digest()` and
 `rintls_nist_ecdsa_verify_digest()` are the separate path for callers that
 already have an ECDSA digest: only 32-, 48-, and 64-byte SHA-256/SHA-384/
 SHA-512 digests are admitted, so these callers do not accidentally hash a

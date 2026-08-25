@@ -20,11 +20,13 @@ extern "C" {
 #define RINTLS_MLKEM_SHARED_SECRET_SIZE 32u
 
 /* For recognized parameter sets, non-NULL output buffers and size outputs are
- * cleared before later admission failure. An unknown set has no safe output
- * extent to clear. ML-KEM decapsulation preserves the FIPS 203
- * implicit-rejection secret for malformed ciphertexts, but rejects a private
- * key whose embedded public-key hash is inconsistent. Verification
- * distinguishes an invalid signature from an operational fault. */
+ * cleared before an ordinary later admission failure. An unknown set has no
+ * safe output extent to clear. An output overlapping another non-empty buffer
+ * argument is rejected before every write, preserving caller storage. ML-KEM
+ * decapsulation preserves the FIPS 203 implicit-rejection secret for malformed
+ * ciphertexts, but rejects a private key whose embedded public-key hash is
+ * inconsistent. Verification distinguishes an invalid signature from an
+ * operational fault. */
 #define RINTLS_PQC_VERIFY_VALID 0
 #define RINTLS_PQC_VERIFY_INVALID 1
 

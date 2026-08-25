@@ -8,6 +8,8 @@
 
 #include "modern.h"
 
+#include <stdint.h>
+
 #include <libecc/curves/ec_params.h>
 #include <libecc/curves/known/ec_params_secp256r1.h>
 #include <libecc/curves/known/ec_params_secp384r1.h>
@@ -40,14 +42,34 @@ static int rintls_context_is_valid(const u8* context, rin_size_t context_len)
     return (context != NULL || context_len == 0) && context_len <= 255u;
 }
 
-/* A caller may reuse an output buffer after an admission failure.  Clear every
- * output whose fixed size is known before inspecting the other inputs, so an
- * invalid peer/key/message cannot make a prior key, signature, or secret look
- * like the result of this operation. */
+/* A caller may reuse an output buffer after an admission failure. Clear every
+ * known output for ordinary invalid peer/key/message input so prior material
+ * cannot look like the result of this operation. Overlap is handled separately
+ * before writing because clearing it would corrupt another argument. */
 static void rintls_clear_output(void* output, rin_size_t output_size)
 {
     if (output)
         rintls_memset(output, 0, output_size);
+}
+
+/* Public-key APIs cannot safely support an output that aliases an input (or a
+ * second output): their failure policy clears result buffers.  Detect that
+ * caller error before the first write, so a rejected call cannot erase key or
+ * message material.  Compare integer addresses without forming an end
+ * pointer, which also avoids an address-plus-length wraparound. */
+static int rintls_ranges_overlap(const void* left, rin_size_t left_size,
+                                 const void* right, rin_size_t right_size)
+{
+    uintptr_t left_address;
+    uintptr_t right_address;
+
+    if (!left || !right || left_size == 0u || right_size == 0u)
+        return 0;
+    left_address = (uintptr_t)left;
+    right_address = (uintptr_t)right;
+    if (left_address <= right_address)
+        return right_address - left_address < left_size;
+    return left_address - right_address < right_size;
 }
 
 static void rintls_clear_size_output(rin_size_t* output)
@@ -171,10 +193,16 @@ int rintls_nist_keygen(u32 curve, u8* private_key, u8* public_key)
     if (rintls_nist_parameters(curve, &str_params, &scalar_size, &public_size) != 0)
         return -1;
 
+    if (!private_key || !public_key) {
+        rintls_clear_output(private_key, scalar_size);
+        rintls_clear_output(public_key, public_size);
+        return -1;
+    }
+    if (rintls_ranges_overlap(private_key, scalar_size,
+                              public_key, public_size))
+        return -1;
     rintls_clear_output(private_key, scalar_size);
     rintls_clear_output(public_key, public_size);
-    if (!private_key || !public_key)
-        return -1;
 
     rintls_memset(&params, 0, sizeof(params));
     rintls_memset(&key_pair, 0, sizeof(key_pair));
@@ -216,9 +244,14 @@ int rintls_nist_public_from_private(u32 curve, const u8* private_key,
     if (rintls_nist_parameters(curve, &str_params, &scalar_size, &public_size) != 0)
         return -1;
 
-    rintls_clear_output(public_key, public_size);
-    if (!private_key || !public_key)
+    if (!private_key || !public_key) {
+        rintls_clear_output(public_key, public_size);
         return -1;
+    }
+    if (rintls_ranges_overlap(public_key, public_size,
+                              private_key, scalar_size))
+        return -1;
+    rintls_clear_output(public_key, public_size);
 
     rintls_memset(&params, 0, sizeof(params));
     rintls_memset(&key_pair, 0, sizeof(key_pair));
@@ -286,10 +319,17 @@ int rintls_nist_ecdh(u32 curve, u8* shared_secret, const u8* private_key,
     if (rintls_nist_parameters(curve, &str_params, &scalar_size, &public_size) != 0)
         return -1;
 
-    rintls_clear_output(shared_secret, scalar_size);
     if (!shared_secret || !private_key || !peer_public_key ||
-        peer_public_key_len != public_size || peer_public_key[0] != 0x04)
+        peer_public_key_len != public_size || peer_public_key[0] != 0x04) {
+        rintls_clear_output(shared_secret, scalar_size);
         return -1;
+    }
+    if (rintls_ranges_overlap(shared_secret, scalar_size,
+                              private_key, scalar_size) ||
+        rintls_ranges_overlap(shared_secret, scalar_size,
+                              peer_public_key, public_size))
+        return -1;
+    rintls_clear_output(shared_secret, scalar_size);
 
     rintls_memset(&params, 0, sizeof(params));
     rintls_memset(&key_pair, 0, sizeof(key_pair));
@@ -326,10 +366,18 @@ int rintls_nist_ecdsa_sign(u32 curve, u32 hash_algorithm,
     if (rintls_nist_parameters(curve, &str_params, &scalar_size, &public_size) != 0)
         return -1;
 
-    rintls_clear_output(signature, scalar_size * 2u);
-    if (!private_key || !signature || !rintls_message_is_valid(message, message_len) ||
-        rintls_hash_type(hash_algorithm, &hash_type) != 0)
+    if (!private_key || !signature ||
+        !rintls_message_is_valid(message, message_len) ||
+        rintls_hash_type(hash_algorithm, &hash_type) != 0) {
+        rintls_clear_output(signature, scalar_size * 2u);
         return -1;
+    }
+    if (rintls_ranges_overlap(signature, scalar_size * 2u,
+                              private_key, scalar_size) ||
+        rintls_ranges_overlap(signature, scalar_size * 2u,
+                              message, message_len))
+        return -1;
+    rintls_clear_output(signature, scalar_size * 2u);
 
     rintls_memset(&params, 0, sizeof(params));
     rintls_memset(&key_pair, 0, sizeof(key_pair));
@@ -400,10 +448,17 @@ int rintls_nist_ecdsa_sign_digest(u32 curve, const u8* digest,
     if (rintls_nist_parameters(curve, &str_params, &scalar_size, &public_size) != 0)
         return -1;
 
-    rintls_clear_output(signature, scalar_size * 2u);
     if (!digest || !private_key || !signature ||
-        rintls_hash_type_for_digest_size(digest_len, &hash_type) != 0)
+        rintls_hash_type_for_digest_size(digest_len, &hash_type) != 0) {
+        rintls_clear_output(signature, scalar_size * 2u);
         return -1;
+    }
+    if (rintls_ranges_overlap(signature, scalar_size * 2u,
+                              private_key, scalar_size) ||
+        rintls_ranges_overlap(signature, scalar_size * 2u,
+                              digest, digest_len))
+        return -1;
+    rintls_clear_output(signature, scalar_size * 2u);
 
     rintls_memset(&params, 0, sizeof(params));
     rintls_memset(&key_pair, 0, sizeof(key_pair));
@@ -472,9 +527,14 @@ static int rintls_eddsa_public_from_private(const u8* private_key,
     ec_key_pair key_pair;
     int ret = -1;
 
-    rintls_clear_output(public_key, public_size);
-    if (!private_key || !public_key)
+    if (!private_key || !public_key) {
+        rintls_clear_output(public_key, public_size);
         return -1;
+    }
+    if (rintls_ranges_overlap(public_key, public_size,
+                              private_key, private_size))
+        return -1;
+    rintls_clear_output(public_key, public_size);
 
     rintls_memset(&params, 0, sizeof(params));
     rintls_memset(&key_pair, 0, sizeof(key_pair));
@@ -496,10 +556,16 @@ static int rintls_eddsa_public_from_private(const u8* private_key,
 int rintls_ed25519_keygen(u8 private_key[RINTLS_ED25519_PRIVATE_KEY_SIZE],
                           u8 public_key[RINTLS_ED25519_PUBLIC_KEY_SIZE])
 {
+    if (!private_key || !public_key) {
+        rintls_clear_output(private_key, RINTLS_ED25519_PRIVATE_KEY_SIZE);
+        rintls_clear_output(public_key, RINTLS_ED25519_PUBLIC_KEY_SIZE);
+        return -1;
+    }
+    if (rintls_ranges_overlap(private_key, RINTLS_ED25519_PRIVATE_KEY_SIZE,
+                              public_key, RINTLS_ED25519_PUBLIC_KEY_SIZE))
+        return -1;
     rintls_clear_output(private_key, RINTLS_ED25519_PRIVATE_KEY_SIZE);
     rintls_clear_output(public_key, RINTLS_ED25519_PUBLIC_KEY_SIZE);
-    if (!private_key || !public_key)
-        return -1;
     if (rintls_get_random(private_key, RINTLS_ED25519_PRIVATE_KEY_SIZE) != 0 ||
         rintls_ed25519_public_from_private(private_key, public_key) != 0) {
         rintls_memset(private_key, 0, RINTLS_ED25519_PRIVATE_KEY_SIZE);
@@ -528,9 +594,17 @@ int rintls_ed25519_sign(u8 signature[RINTLS_ED25519_SIGNATURE_SIZE],
     ec_key_pair key_pair;
     int ret = -1;
 
-    rintls_clear_output(signature, RINTLS_ED25519_SIGNATURE_SIZE);
-    if (!signature || !private_key || !rintls_message_is_valid(message, message_len))
+    if (!signature || !private_key ||
+        !rintls_message_is_valid(message, message_len)) {
+        rintls_clear_output(signature, RINTLS_ED25519_SIGNATURE_SIZE);
         return -1;
+    }
+    if (rintls_ranges_overlap(signature, RINTLS_ED25519_SIGNATURE_SIZE,
+                              private_key, RINTLS_ED25519_PRIVATE_KEY_SIZE) ||
+        rintls_ranges_overlap(signature, RINTLS_ED25519_SIGNATURE_SIZE,
+                              message, message_len))
+        return -1;
+    rintls_clear_output(signature, RINTLS_ED25519_SIGNATURE_SIZE);
     rintls_memset(&params, 0, sizeof(params));
     rintls_memset(&key_pair, 0, sizeof(key_pair));
     if (import_params(&params, &wei25519_str_params) == 0 &&
@@ -576,10 +650,16 @@ int rintls_ed25519_verify(
 int rintls_ed448_keygen(u8 private_key[RINTLS_ED448_PRIVATE_KEY_SIZE],
                         u8 public_key[RINTLS_ED448_PUBLIC_KEY_SIZE])
 {
+    if (!private_key || !public_key) {
+        rintls_clear_output(private_key, RINTLS_ED448_PRIVATE_KEY_SIZE);
+        rintls_clear_output(public_key, RINTLS_ED448_PUBLIC_KEY_SIZE);
+        return -1;
+    }
+    if (rintls_ranges_overlap(private_key, RINTLS_ED448_PRIVATE_KEY_SIZE,
+                              public_key, RINTLS_ED448_PUBLIC_KEY_SIZE))
+        return -1;
     rintls_clear_output(private_key, RINTLS_ED448_PRIVATE_KEY_SIZE);
     rintls_clear_output(public_key, RINTLS_ED448_PUBLIC_KEY_SIZE);
-    if (!private_key || !public_key)
-        return -1;
     if (rintls_get_random(private_key, RINTLS_ED448_PRIVATE_KEY_SIZE) != 0 ||
         rintls_ed448_public_from_private(private_key, public_key) != 0) {
         rintls_memset(private_key, 0, RINTLS_ED448_PRIVATE_KEY_SIZE);
@@ -609,10 +689,20 @@ int rintls_ed448_sign(u8 signature[RINTLS_ED448_SIGNATURE_SIZE],
     ec_key_pair key_pair;
     int ret = -1;
 
-    rintls_clear_output(signature, RINTLS_ED448_SIGNATURE_SIZE);
-    if (!signature || !private_key || !rintls_message_is_valid(message, message_len) ||
-        !rintls_context_is_valid(context, context_len))
+    if (!signature || !private_key ||
+        !rintls_message_is_valid(message, message_len) ||
+        !rintls_context_is_valid(context, context_len)) {
+        rintls_clear_output(signature, RINTLS_ED448_SIGNATURE_SIZE);
         return -1;
+    }
+    if (rintls_ranges_overlap(signature, RINTLS_ED448_SIGNATURE_SIZE,
+                              private_key, RINTLS_ED448_PRIVATE_KEY_SIZE) ||
+        rintls_ranges_overlap(signature, RINTLS_ED448_SIGNATURE_SIZE,
+                              message, message_len) ||
+        rintls_ranges_overlap(signature, RINTLS_ED448_SIGNATURE_SIZE,
+                              context, context_len))
+        return -1;
+    rintls_clear_output(signature, RINTLS_ED448_SIGNATURE_SIZE);
     rintls_memset(&params, 0, sizeof(params));
     rintls_memset(&key_pair, 0, sizeof(key_pair));
     if (import_params(&params, &wei448_str_params) == 0 &&
@@ -661,10 +751,16 @@ int rintls_ed448_verify(const u8 signature[RINTLS_ED448_SIGNATURE_SIZE],
 int rintls_x448_keygen(u8 private_key[RINTLS_X448_KEY_SIZE],
                        u8 public_key[RINTLS_X448_KEY_SIZE])
 {
+    if (!private_key || !public_key) {
+        rintls_clear_output(private_key, RINTLS_X448_KEY_SIZE);
+        rintls_clear_output(public_key, RINTLS_X448_KEY_SIZE);
+        return -1;
+    }
+    if (rintls_ranges_overlap(private_key, RINTLS_X448_KEY_SIZE,
+                              public_key, RINTLS_X448_KEY_SIZE))
+        return -1;
     rintls_clear_output(private_key, RINTLS_X448_KEY_SIZE);
     rintls_clear_output(public_key, RINTLS_X448_KEY_SIZE);
-    if (!private_key || !public_key)
-        return -1;
     if (rintls_get_random(private_key, RINTLS_X448_KEY_SIZE) != 0 ||
         x448_init_pub_key(private_key, public_key) != 0) {
         rintls_memset(private_key, 0, RINTLS_X448_KEY_SIZE);
@@ -677,9 +773,14 @@ int rintls_x448_keygen(u8 private_key[RINTLS_X448_KEY_SIZE],
 int rintls_x448_public_from_private(const u8 private_key[RINTLS_X448_KEY_SIZE],
                                     u8 public_key[RINTLS_X448_KEY_SIZE])
 {
-    rintls_clear_output(public_key, RINTLS_X448_KEY_SIZE);
-    if (!private_key || !public_key)
+    if (!private_key || !public_key) {
+        rintls_clear_output(public_key, RINTLS_X448_KEY_SIZE);
         return -1;
+    }
+    if (rintls_ranges_overlap(public_key, RINTLS_X448_KEY_SIZE,
+                              private_key, RINTLS_X448_KEY_SIZE))
+        return -1;
+    rintls_clear_output(public_key, RINTLS_X448_KEY_SIZE);
     if (x448_init_pub_key(private_key, public_key) != 0) {
         rintls_memset(public_key, 0, RINTLS_X448_KEY_SIZE);
         return -1;
@@ -693,9 +794,16 @@ int rintls_x448_ecdh(u8 shared_secret[RINTLS_X448_KEY_SIZE],
 {
     u8 zero[RINTLS_X448_KEY_SIZE] = { 0 };
 
-    rintls_clear_output(shared_secret, RINTLS_X448_KEY_SIZE);
-    if (!shared_secret || !private_key || !peer_public_key)
+    if (!shared_secret || !private_key || !peer_public_key) {
+        rintls_clear_output(shared_secret, RINTLS_X448_KEY_SIZE);
         return -1;
+    }
+    if (rintls_ranges_overlap(shared_secret, RINTLS_X448_KEY_SIZE,
+                              private_key, RINTLS_X448_KEY_SIZE) ||
+        rintls_ranges_overlap(shared_secret, RINTLS_X448_KEY_SIZE,
+                              peer_public_key, RINTLS_X448_KEY_SIZE))
+        return -1;
+    rintls_clear_output(shared_secret, RINTLS_X448_KEY_SIZE);
     if (x448_derive_secret(private_key, peer_public_key, shared_secret) != 0 ||
         rintls_secure_cmp(shared_secret, zero, RINTLS_X448_KEY_SIZE)) {
         rintls_secure_zero(shared_secret, RINTLS_X448_KEY_SIZE);

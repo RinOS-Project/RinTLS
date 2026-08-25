@@ -39,9 +39,11 @@ extern "C" {
 #define RINTLS_HASH_SHA512 3u
 
 /* Every function returns zero only on success. For recognized parameter sets,
- * non-NULL output buffers (and size outputs) are cleared before any later
- * admission failure; an unknown set has no safe output extent to clear.
- * Every pointer/length pair is validated before provider calls. */
+ * non-NULL output buffers (and size outputs) are cleared before an ordinary
+ * later admission failure; an unknown set has no safe output extent to clear.
+ * An output overlapping any other non-empty buffer argument is instead
+ * rejected before every write, preserving caller storage. Every pointer/length
+ * pair is validated before provider calls. */
 int rintls_nist_private_key_size(u32 curve, rin_size_t* size_out);
 int rintls_nist_public_key_size(u32 curve, rin_size_t* size_out);
 int rintls_nist_keygen(u32 curve, u8* private_key, u8* public_key);

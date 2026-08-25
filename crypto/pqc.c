@@ -1,6 +1,8 @@
 /* Fixed-width rintls facade for the three FIPS 203/204 parameter sets. */
 #include "pqc.h"
 
+#include <stdint.h>
+
 typedef int (*rintls_mldsa_keypair_fn)(u8*, u8*, const u8*);
 typedef int (*rintls_mldsa_public_fn)(u8*, const u8*);
 typedef int (*rintls_mldsa_sign_fn)(u8*, const u8*, size_t, const u8*, size_t,
@@ -82,6 +84,25 @@ static void rintls_clear_pqc_output(void* output, rin_size_t output_size)
 {
     if (output)
         rintls_memset(output, 0, output_size);
+}
+
+/* Result buffers are zeroized on ordinary admission/provider failures. They
+ * must therefore be disjoint from inputs and from each other: reject overlap
+ * before the first write, preserving every caller buffer on this invalid ABI
+ * use. Subtraction avoids forming a potentially wrapping end address. */
+static int rintls_pqc_ranges_overlap(const void* left, rin_size_t left_size,
+                                     const void* right, rin_size_t right_size)
+{
+    uintptr_t left_address;
+    uintptr_t right_address;
+
+    if (!left || !right || left_size == 0u || right_size == 0u)
+        return 0;
+    left_address = (uintptr_t)left;
+    right_address = (uintptr_t)right;
+    if (left_address <= right_address)
+        return right_address - left_address < left_size;
+    return left_address - right_address < right_size;
 }
 
 static void rintls_clear_size_output(rin_size_t* output)
@@ -195,10 +216,20 @@ int rintls_mldsa_keygen_from_seed(u32 level,
     if (rintls_mldsa_provider_for_level(level, &provider) != 0)
         return -1;
 
+    if (!seed || !public_key || !private_key) {
+        rintls_clear_pqc_output(public_key, provider.public_key_size);
+        rintls_clear_pqc_output(private_key, provider.private_key_size);
+        return -1;
+    }
+    if (rintls_pqc_ranges_overlap(public_key, provider.public_key_size,
+                                  private_key, provider.private_key_size) ||
+        rintls_pqc_ranges_overlap(public_key, provider.public_key_size,
+                                  seed, RINTLS_MLDSA_SEED_SIZE) ||
+        rintls_pqc_ranges_overlap(private_key, provider.private_key_size,
+                                  seed, RINTLS_MLDSA_SEED_SIZE))
+        return -1;
     rintls_clear_pqc_output(public_key, provider.public_key_size);
     rintls_clear_pqc_output(private_key, provider.private_key_size);
-    if (!seed || !public_key || !private_key)
-        return -1;
     if (provider.keypair(public_key, private_key, seed) == 0)
         ret = 0;
     if (ret != 0) {
@@ -213,14 +244,26 @@ int rintls_mldsa_keygen(u32 level, u8 seed[RINTLS_MLDSA_SEED_SIZE],
 {
     rintls_mldsa_provider provider;
 
-    rintls_clear_pqc_output(seed, RINTLS_MLDSA_SEED_SIZE);
-    if (rintls_mldsa_provider_for_level(level, &provider) != 0)
+    if (rintls_mldsa_provider_for_level(level, &provider) != 0) {
+        rintls_clear_pqc_output(seed, RINTLS_MLDSA_SEED_SIZE);
         return -1;
-
+    }
+    if (!seed || !public_key || !private_key) {
+        rintls_clear_pqc_output(seed, RINTLS_MLDSA_SEED_SIZE);
+        rintls_clear_pqc_output(public_key, provider.public_key_size);
+        rintls_clear_pqc_output(private_key, provider.private_key_size);
+        return -1;
+    }
+    if (rintls_pqc_ranges_overlap(seed, RINTLS_MLDSA_SEED_SIZE,
+                                  public_key, provider.public_key_size) ||
+        rintls_pqc_ranges_overlap(seed, RINTLS_MLDSA_SEED_SIZE,
+                                  private_key, provider.private_key_size) ||
+        rintls_pqc_ranges_overlap(public_key, provider.public_key_size,
+                                  private_key, provider.private_key_size))
+        return -1;
+    rintls_clear_pqc_output(seed, RINTLS_MLDSA_SEED_SIZE);
     rintls_clear_pqc_output(public_key, provider.public_key_size);
     rintls_clear_pqc_output(private_key, provider.private_key_size);
-    if (!seed || !public_key || !private_key)
-        return -1;
     if (rintls_get_random(seed, RINTLS_MLDSA_SEED_SIZE) != 0 ||
         rintls_mldsa_keygen_from_seed(level, seed, public_key, private_key) != 0) {
         rintls_memset(seed, 0, RINTLS_MLDSA_SEED_SIZE);
@@ -240,9 +283,14 @@ int rintls_mldsa_public_from_private(u32 level, u8* public_key,
     if (rintls_mldsa_provider_for_level(level, &provider) != 0)
         return -1;
 
-    rintls_clear_pqc_output(public_key, provider.public_key_size);
-    if (!public_key || !private_key)
+    if (!public_key || !private_key) {
+        rintls_clear_pqc_output(public_key, provider.public_key_size);
         return -1;
+    }
+    if (rintls_pqc_ranges_overlap(public_key, provider.public_key_size,
+                                  private_key, provider.private_key_size))
+        return -1;
+    rintls_clear_pqc_output(public_key, provider.public_key_size);
     if (provider.public_from_private(public_key, private_key) == 0)
         ret = 0;
     if (ret != 0)
@@ -261,11 +309,20 @@ int rintls_mldsa_sign(u32 level, u8* signature, const u8* message,
     if (rintls_mldsa_provider_for_level(level, &provider) != 0)
         return -1;
 
-    rintls_clear_pqc_output(signature, provider.signature_size);
     if (!signature || !private_key ||
         !rintls_message_and_context_are_valid(message, message_len, context,
-                                              context_len))
+                                              context_len)) {
+        rintls_clear_pqc_output(signature, provider.signature_size);
         return -1;
+    }
+    if (rintls_pqc_ranges_overlap(signature, provider.signature_size,
+                                  private_key, provider.private_key_size) ||
+        rintls_pqc_ranges_overlap(signature, provider.signature_size,
+                                  message, message_len) ||
+        rintls_pqc_ranges_overlap(signature, provider.signature_size,
+                                  context, context_len))
+        return -1;
+    rintls_clear_pqc_output(signature, provider.signature_size);
     rintls_memset(derived_public_key, 0, sizeof(derived_public_key));
     /* Validate imported private keys before using them for signing. */
     if (provider.public_from_private(derived_public_key, private_key) != 0 ||
@@ -331,10 +388,20 @@ int rintls_mlkem_keygen_from_seed(u32 level,
     if (rintls_mlkem_provider_for_level(level, &provider) != 0)
         return -1;
 
+    if (!seed || !public_key || !private_key) {
+        rintls_clear_pqc_output(public_key, provider.public_key_size);
+        rintls_clear_pqc_output(private_key, provider.private_key_size);
+        return -1;
+    }
+    if (rintls_pqc_ranges_overlap(public_key, provider.public_key_size,
+                                  private_key, provider.private_key_size) ||
+        rintls_pqc_ranges_overlap(public_key, provider.public_key_size,
+                                  seed, RINTLS_MLKEM_SEED_SIZE) ||
+        rintls_pqc_ranges_overlap(private_key, provider.private_key_size,
+                                  seed, RINTLS_MLKEM_SEED_SIZE))
+        return -1;
     rintls_clear_pqc_output(public_key, provider.public_key_size);
     rintls_clear_pqc_output(private_key, provider.private_key_size);
-    if (!seed || !public_key || !private_key)
-        return -1;
     /* Provider PCT is enabled in every configuration and uses the same
      * rintls CSPRNG through mlk_randombytes. */
     if (provider.keypair(public_key, private_key, seed) == 0)
@@ -351,14 +418,26 @@ int rintls_mlkem_keygen(u32 level, u8 seed[RINTLS_MLKEM_SEED_SIZE],
 {
     rintls_mlkem_provider provider;
 
-    rintls_clear_pqc_output(seed, RINTLS_MLKEM_SEED_SIZE);
-    if (rintls_mlkem_provider_for_level(level, &provider) != 0)
+    if (rintls_mlkem_provider_for_level(level, &provider) != 0) {
+        rintls_clear_pqc_output(seed, RINTLS_MLKEM_SEED_SIZE);
         return -1;
-
+    }
+    if (!seed || !public_key || !private_key) {
+        rintls_clear_pqc_output(seed, RINTLS_MLKEM_SEED_SIZE);
+        rintls_clear_pqc_output(public_key, provider.public_key_size);
+        rintls_clear_pqc_output(private_key, provider.private_key_size);
+        return -1;
+    }
+    if (rintls_pqc_ranges_overlap(seed, RINTLS_MLKEM_SEED_SIZE,
+                                  public_key, provider.public_key_size) ||
+        rintls_pqc_ranges_overlap(seed, RINTLS_MLKEM_SEED_SIZE,
+                                  private_key, provider.private_key_size) ||
+        rintls_pqc_ranges_overlap(public_key, provider.public_key_size,
+                                  private_key, provider.private_key_size))
+        return -1;
+    rintls_clear_pqc_output(seed, RINTLS_MLKEM_SEED_SIZE);
     rintls_clear_pqc_output(public_key, provider.public_key_size);
     rintls_clear_pqc_output(private_key, provider.private_key_size);
-    if (!seed || !public_key || !private_key)
-        return -1;
     if (rintls_get_random(seed, RINTLS_MLKEM_SEED_SIZE) != 0 ||
         rintls_mlkem_keygen_from_seed(level, seed, public_key, private_key) != 0) {
         rintls_memset(seed, 0, RINTLS_MLKEM_SEED_SIZE);
@@ -378,9 +457,14 @@ int rintls_mlkem_public_from_private(u32 level, u8* public_key,
     if (rintls_mlkem_provider_for_level(level, &provider) != 0)
         return -1;
 
-    rintls_clear_pqc_output(public_key, provider.public_key_size);
-    if (!public_key || !private_key)
+    if (!public_key || !private_key) {
+        rintls_clear_pqc_output(public_key, provider.public_key_size);
         return -1;
+    }
+    if (rintls_pqc_ranges_overlap(public_key, provider.public_key_size,
+                                  private_key, provider.private_key_size))
+        return -1;
+    rintls_clear_pqc_output(public_key, provider.public_key_size);
     if (provider.check_private_key(private_key) != 0)
         return -1;
     /* FIPS 203 encodes sk = s || pk || H(pk) || z.  check_sk above verifies
@@ -399,13 +483,26 @@ int rintls_mlkem_encapsulate(u32 level, u8* ciphertext,
     rintls_mlkem_provider provider;
     int ret = -1;
 
-    rintls_clear_pqc_output(shared_secret, RINTLS_MLKEM_SHARED_SECRET_SIZE);
-    if (rintls_mlkem_provider_for_level(level, &provider) != 0)
+    if (rintls_mlkem_provider_for_level(level, &provider) != 0) {
+        rintls_clear_pqc_output(shared_secret, RINTLS_MLKEM_SHARED_SECRET_SIZE);
         return -1;
-
+    }
+    if (!ciphertext || !shared_secret || !public_key) {
+        rintls_clear_pqc_output(ciphertext, provider.ciphertext_size);
+        rintls_clear_pqc_output(shared_secret, RINTLS_MLKEM_SHARED_SECRET_SIZE);
+        return -1;
+    }
+    if (rintls_pqc_ranges_overlap(ciphertext, provider.ciphertext_size,
+                                  shared_secret,
+                                  RINTLS_MLKEM_SHARED_SECRET_SIZE) ||
+        rintls_pqc_ranges_overlap(ciphertext, provider.ciphertext_size,
+                                  public_key, provider.public_key_size) ||
+        rintls_pqc_ranges_overlap(shared_secret,
+                                  RINTLS_MLKEM_SHARED_SECRET_SIZE,
+                                  public_key, provider.public_key_size))
+        return -1;
     rintls_clear_pqc_output(ciphertext, provider.ciphertext_size);
-    if (!ciphertext || !shared_secret || !public_key)
-        return -1;
+    rintls_clear_pqc_output(shared_secret, RINTLS_MLKEM_SHARED_SECRET_SIZE);
     if (provider.encapsulate(ciphertext, shared_secret, public_key) == 0)
         ret = 0;
     if (ret != 0) {
@@ -422,11 +519,22 @@ int rintls_mlkem_decapsulate(u32 level,
     rintls_mlkem_provider provider;
     int ret = -1;
 
+    if (rintls_mlkem_provider_for_level(level, &provider) != 0) {
+        rintls_clear_pqc_output(shared_secret, RINTLS_MLKEM_SHARED_SECRET_SIZE);
+        return -1;
+    }
+    if (!shared_secret || !ciphertext || !private_key) {
+        rintls_clear_pqc_output(shared_secret, RINTLS_MLKEM_SHARED_SECRET_SIZE);
+        return -1;
+    }
+    if (rintls_pqc_ranges_overlap(shared_secret,
+                                  RINTLS_MLKEM_SHARED_SECRET_SIZE,
+                                  ciphertext, provider.ciphertext_size) ||
+        rintls_pqc_ranges_overlap(shared_secret,
+                                  RINTLS_MLKEM_SHARED_SECRET_SIZE,
+                                  private_key, provider.private_key_size))
+        return -1;
     rintls_clear_pqc_output(shared_secret, RINTLS_MLKEM_SHARED_SECRET_SIZE);
-    if (rintls_mlkem_provider_for_level(level, &provider) != 0)
-        return -1;
-    if (!shared_secret || !ciphertext || !private_key)
-        return -1;
     /* Decapsulation intentionally produces the implicit-rejection secret for
      * a malformed ciphertext. A malformed private key, however, must never
      * reach the provider: validate its embedded public-key hash first. */
