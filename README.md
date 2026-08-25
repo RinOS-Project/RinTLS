@@ -29,5 +29,9 @@ malformed ciphertext, while a private key with an inconsistent embedded
 public-key hash is rejected before it reaches the provider and its caller
 shared-secret output is cleared. Both X25519 and X448 reject the all-zero
 shared secret produced by a low-order peer input and clear their caller output
-before returning an error. RSA key generation and browser-process/QEMU
-WebCrypto coverage remain unfinished; see the root `TODO.md`.
+before returning an error. RSA-OAEP, RSASSA-PKCS1-v1_5, and RSA-PSS apply the
+same boundary to their result bytes and result-length record: neither may
+overlap a key, label, message, ciphertext, signature, or each other. An
+overlap is rejected without modifying caller storage. RSA key generation and
+browser-process/QEMU WebCrypto coverage remain unfinished; see the root
+`TODO.md`.

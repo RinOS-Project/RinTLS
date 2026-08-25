@@ -48,6 +48,18 @@ static int bytes_are_zero(const void* bytes, size_t length)
     return 1;
 }
 
+static int bytes_have_value(const void* bytes, size_t length, u8 value)
+{
+    const u8* cursor = bytes;
+    size_t index;
+
+    for (index = 0; index < length; ++index) {
+        if (cursor[index] != value)
+            return 0;
+    }
+    return 1;
+}
+
 static void test_keygen_and_oaep_fail_closed(void)
 {
     rintls_rsa_private_key key;
@@ -190,11 +202,72 @@ static void test_pss(void)
     assert(signature_length == 0);
 }
 
+static void test_overlapping_result_buffers_are_immutable(void)
+{
+    rintls_rsa_private_key key;
+    u8 overlap[RINTLS_RSA_MAX_MODULUS_BYTES];
+    u8 label[] = "rsa overlap label";
+    rin_size_t result_length = (rin_size_t)0xa5a5a5a5u;
+    union {
+        rin_size_t length;
+        u8 bytes[RINTLS_RSA_MAX_MODULUS_BYTES];
+    } output_and_length;
+
+    test_random_mode = RANDOM_MODE_FIXED;
+    assert(rintls_rsa_generate_keypair(2048u, 65537u, &key) == 0);
+    test_random_mode = RANDOM_MODE_FAIL;
+    test_random_calls = 0u;
+
+    memset(overlap, 0xa5, sizeof(overlap));
+    assert(rintls_rsa_oaep_encrypt(RINTLS_RSA_HASH_SHA256, &key.public_key,
+                                   label, sizeof(label) - 1u, overlap + 32u,
+                                   16u, overlap, sizeof(overlap),
+                                   &result_length) != 0);
+    assert(bytes_have_value(overlap, sizeof(overlap), 0xa5));
+    assert(result_length == (rin_size_t)0xa5a5a5a5u);
+    assert(test_random_calls == 0u);
+
+    memset(overlap, 0xa5, sizeof(overlap));
+    result_length = (rin_size_t)0xa5a5a5a5u;
+    assert(rintls_rsa_oaep_decrypt(RINTLS_RSA_HASH_SHA256, &key, overlap,
+                                   256u, label, sizeof(label) - 1u, overlap,
+                                   sizeof(overlap), &result_length) != 0);
+    assert(bytes_have_value(overlap, sizeof(overlap), 0xa5));
+    assert(result_length == (rin_size_t)0xa5a5a5a5u);
+
+    memset(overlap, 0xa5, sizeof(overlap));
+    result_length = (rin_size_t)0xa5a5a5a5u;
+    assert(rintls_rsa_pkcs1_sign(RINTLS_RSA_HASH_SHA256, &key, overlap + 32u,
+                                 16u, overlap, sizeof(overlap),
+                                 &result_length) != 0);
+    assert(bytes_have_value(overlap, sizeof(overlap), 0xa5));
+    assert(result_length == (rin_size_t)0xa5a5a5a5u);
+
+    memset(overlap, 0xa5, sizeof(overlap));
+    result_length = (rin_size_t)0xa5a5a5a5u;
+    assert(rintls_rsa_pss_sign(RINTLS_RSA_HASH_SHA256, &key, overlap + 32u,
+                               16u, 32u, overlap, sizeof(overlap),
+                               &result_length) != 0);
+    assert(bytes_have_value(overlap, sizeof(overlap), 0xa5));
+    assert(result_length == (rin_size_t)0xa5a5a5a5u);
+
+    memset(&output_and_length, 0xa5, sizeof(output_and_length));
+    assert(rintls_rsa_oaep_encrypt(RINTLS_RSA_HASH_SHA256, &key.public_key,
+                                   label, sizeof(label) - 1u, label,
+                                   sizeof(label) - 1u, output_and_length.bytes,
+                                   sizeof(output_and_length.bytes),
+                                   &output_and_length.length) != 0);
+    assert(bytes_have_value(output_and_length.bytes,
+                            sizeof(output_and_length.bytes), 0xa5));
+    assert(test_random_calls == 0u);
+}
+
 int main(void)
 {
     test_keygen_and_oaep_fail_closed();
     test_oaep_and_pkcs1();
     test_pss();
+    test_overlapping_result_buffers_are_immutable();
     puts("rsa_webcrypto_test: OK");
     return 0;
 }

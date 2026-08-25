@@ -50,9 +50,11 @@ typedef struct {
 
 /* Output capacities must describe the supplied buffers and cannot exceed
  * RINTLS_RSA_MAX_MODULUS_BYTES. On failure, the declared output range is
- * cleared. RSA-PSS uses the selected message hash for MGF1. A salt length of
- * RINTLS_RSA_PSS_SALT_LENGTH_MAX requests the largest RFC 8017 value for the
- * key and hash. */
+ * cleared. Every result buffer and its length record must be disjoint from
+ * every other non-empty buffer argument; an overlap is rejected before every
+ * write and leaves caller storage unchanged. RSA-PSS uses the selected message
+ * hash for MGF1. A salt length of RINTLS_RSA_PSS_SALT_LENGTH_MAX requests the
+ * largest RFC 8017 value for the key and hash. */
 int rintls_rsa_generate_keypair(u32 modulus_bits, u32 public_exponent,
                                 rintls_rsa_private_key* key_out);
 int rintls_rsa_oaep_encrypt(u32 hash_algorithm,

@@ -2,6 +2,8 @@
 
 #include "rsa_webcrypto.h"
 
+#include <stdint.h>
+
 #include <bearssl.h>
 
 /* BearSSL exposes MGF1 to its RSA implementations but not its public API.
@@ -66,6 +68,48 @@ static void rintls_rsa_clear_output(u8* output, rin_size_t capacity)
 {
     if (rintls_rsa_output_is_valid(output, capacity))
         rintls_secure_zero(output, capacity);
+}
+
+/* Result buffers are cleared on ordinary failure.  An output or its length
+ * record must therefore never alias another buffer argument: reject such a
+ * call before the first write, preserving key/input material.  Use address
+ * subtraction rather than an end pointer so malformed size values cannot
+ * wrap the comparison. */
+static int rintls_rsa_ranges_overlap(const void* left, rin_size_t left_size,
+                                     const void* right, rin_size_t right_size)
+{
+    uintptr_t left_address;
+    uintptr_t right_address;
+
+    if (!left || !right || left_size == 0u || right_size == 0u)
+        return 0;
+    left_address = (uintptr_t)left;
+    right_address = (uintptr_t)right;
+    if (left_address <= right_address)
+        return right_address - left_address < left_size;
+    return left_address - right_address < right_size;
+}
+
+static int rintls_rsa_result_is_disjoint(
+    const u8* output, rin_size_t output_capacity,
+    const rin_size_t* output_length, const void* first,
+    rin_size_t first_size, const void* second, rin_size_t second_size,
+    const void* third, rin_size_t third_size)
+{
+    return !rintls_rsa_ranges_overlap(output, output_capacity, output_length,
+                                      sizeof(*output_length)) &&
+           !rintls_rsa_ranges_overlap(output, output_capacity, first,
+                                      first_size) &&
+           !rintls_rsa_ranges_overlap(output, output_capacity, second,
+                                      second_size) &&
+           !rintls_rsa_ranges_overlap(output, output_capacity, third,
+                                      third_size) &&
+           !rintls_rsa_ranges_overlap(output_length, sizeof(*output_length),
+                                      first, first_size) &&
+           !rintls_rsa_ranges_overlap(output_length, sizeof(*output_length),
+                                      second, second_size) &&
+           !rintls_rsa_ranges_overlap(output_length, sizeof(*output_length),
+                                      third, third_size);
 }
 
 static int rintls_rsa_public_key_is_valid(const rintls_rsa_public_key* key)
@@ -379,6 +423,7 @@ int rintls_rsa_oaep_encrypt(u32 hash_algorithm,
     u8 seed[48];
     rin_size_t digest_len;
     rin_size_t produced;
+    int result_buffers_writable = 0;
     int result = -1;
 
     rintls_secure_zero(&bearssl_public_key, sizeof(bearssl_public_key));
@@ -386,6 +431,11 @@ int rintls_rsa_oaep_encrypt(u32 hash_algorithm,
     rintls_secure_zero(seed, sizeof(seed));
     if (!encrypted_len)
         goto done;
+    if (!rintls_rsa_result_is_disjoint(
+            encrypted, encrypted_capacity, encrypted_len, public_key,
+            sizeof(*public_key), label, label_len, message, message_len))
+        goto done;
+    result_buffers_writable = 1;
     *encrypted_len = 0;
     if (!rintls_rsa_output_is_valid(encrypted, encrypted_capacity))
         goto done;
@@ -412,10 +462,9 @@ int rintls_rsa_oaep_encrypt(u32 hash_algorithm,
     result = 0;
 
 done:
-    if (result != 0) {
+    if (result != 0 && result_buffers_writable) {
         rintls_rsa_clear_output(encrypted, encrypted_capacity);
-        if (encrypted_len)
-            *encrypted_len = 0;
+        *encrypted_len = 0;
     }
     rintls_secure_zero(seed, sizeof(seed));
     rintls_secure_zero(&rng, sizeof(rng));
@@ -436,12 +485,18 @@ int rintls_rsa_oaep_decrypt(u32 hash_algorithm,
     u8 work[RINTLS_RSA_MAX_MODULUS_BYTES];
     rin_size_t digest_len;
     size_t work_len;
+    int result_buffers_writable = 0;
     int result = -1;
 
     rintls_secure_zero(&bearssl_private_key, sizeof(bearssl_private_key));
     rintls_secure_zero(work, sizeof(work));
     if (!message_len)
         goto done;
+    if (!rintls_rsa_result_is_disjoint(
+            message, message_capacity, message_len, private_key,
+            sizeof(*private_key), encrypted, encrypted_len, label, label_len))
+        goto done;
+    result_buffers_writable = 1;
     *message_len = 0;
     if (!rintls_rsa_output_is_valid(message, message_capacity))
         goto done;
@@ -472,10 +527,9 @@ int rintls_rsa_oaep_decrypt(u32 hash_algorithm,
     result = 0;
 
 done:
-    if (result != 0) {
+    if (result != 0 && result_buffers_writable) {
         rintls_rsa_clear_output(message, message_capacity);
-        if (message_len)
-            *message_len = 0;
+        *message_len = 0;
     }
     rintls_secure_zero(work, sizeof(work));
     rintls_secure_zero(&bearssl_private_key, sizeof(bearssl_private_key));
@@ -495,6 +549,7 @@ int rintls_rsa_pkcs1_sign(u32 hash_algorithm,
     u8 digest[64];
     u8 verified_digest[64];
     rin_size_t digest_len;
+    int result_buffers_writable = 0;
     int result = -1;
 
     rintls_secure_zero(&bearssl_private_key, sizeof(bearssl_private_key));
@@ -503,6 +558,11 @@ int rintls_rsa_pkcs1_sign(u32 hash_algorithm,
     rintls_secure_zero(verified_digest, sizeof(verified_digest));
     if (!signature_len)
         goto done;
+    if (!rintls_rsa_result_is_disjoint(
+            signature, signature_capacity, signature_len, private_key,
+            sizeof(*private_key), message, message_len, NULL, 0u))
+        goto done;
+    result_buffers_writable = 1;
     *signature_len = 0;
     if (!rintls_rsa_output_is_valid(signature, signature_capacity))
         goto done;
@@ -531,10 +591,9 @@ int rintls_rsa_pkcs1_sign(u32 hash_algorithm,
     result = 0;
 
 done:
-    if (result != 0) {
+    if (result != 0 && result_buffers_writable) {
         rintls_rsa_clear_output(signature, signature_capacity);
-        if (signature_len)
-            *signature_len = 0;
+        *signature_len = 0;
     }
     rintls_secure_zero(verified_digest, sizeof(verified_digest));
     rintls_secure_zero(digest, sizeof(digest));
@@ -680,12 +739,18 @@ int rintls_rsa_pss_sign(u32 hash_algorithm,
     const unsigned char* oid;
     rin_size_t digest_len;
     rin_size_t effective_salt_len;
+    int result_buffers_writable = 0;
     int result = -1;
 
     rintls_secure_zero(&bearssl_private_key, sizeof(bearssl_private_key));
     rintls_secure_zero(&bearssl_public_key, sizeof(bearssl_public_key));
     if (!signature_len)
         goto done;
+    if (!rintls_rsa_result_is_disjoint(
+            signature, signature_capacity, signature_len, private_key,
+            sizeof(*private_key), message, message_len, NULL, 0u))
+        goto done;
+    result_buffers_writable = 1;
     *signature_len = 0;
     if (!rintls_rsa_output_is_valid(signature, signature_capacity))
         goto done;
@@ -715,10 +780,9 @@ int rintls_rsa_pss_sign(u32 hash_algorithm,
     result = 0;
 
 done:
-    if (result != 0) {
+    if (result != 0 && result_buffers_writable) {
         rintls_rsa_clear_output(signature, signature_capacity);
-        if (signature_len)
-            *signature_len = 0;
+        *signature_len = 0;
     }
     rintls_secure_zero(&bearssl_public_key, sizeof(bearssl_public_key));
     rintls_secure_zero(&bearssl_private_key, sizeof(bearssl_private_key));
