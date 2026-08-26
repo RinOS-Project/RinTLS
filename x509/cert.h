@@ -162,6 +162,11 @@ int x509_is_self_signed(const x509_cert_t* cert);
 /* 有効期間をチェック */
 int x509_check_validity(const x509_cert_t* cert);
 
+/* Validate against an authenticated Unix timestamp supplied by the caller.
+ * This avoids consulting ambient wall-clock state for security-sensitive
+ * package/update connections. */
+int x509_check_validity_at(const x509_cert_t* cert, u64 unix_time);
+
 /* ホスト名をチェック (CNまたはSAN) */
 int x509_check_hostname(const x509_cert_t* cert, const char* hostname);
 

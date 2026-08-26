@@ -708,6 +708,67 @@ int x509_check_validity(const x509_cert_t* cert)
     return X509_OK;
 }
 
+static int x509_is_leap_year(u32 year)
+{
+    return (year % 4u == 0u && year % 100u != 0u) ||
+           year % 400u == 0u;
+}
+
+static u32 x509_days_in_month(u32 year, u32 month)
+{
+    static const u8 days[] = {
+        31u, 28u, 31u, 30u, 31u, 30u,
+        31u, 31u, 30u, 31u, 30u, 31u
+    };
+    if (month == 0u || month > 12u) return 0u;
+    if (month == 2u && x509_is_leap_year(year)) return 29u;
+    return days[month - 1u];
+}
+
+static int x509_time_from_unix(u64 unix_time, x509_time_t* time)
+{
+    u64 days;
+    u64 seconds;
+    u32 year = 1970u;
+    u32 month = 1u;
+    if (!time || unix_time > 253402300799ULL) return 0;
+    days = unix_time / 86400ULL;
+    seconds = unix_time % 86400ULL;
+    while (year <= 9999u) {
+        u32 year_days = x509_is_leap_year(year) ? 366u : 365u;
+        if (days < year_days) break;
+        days -= year_days;
+        ++year;
+    }
+    if (year > 9999u) return 0;
+    while (month <= 12u) {
+        u32 month_days = x509_days_in_month(year, month);
+        if (days < month_days) break;
+        days -= month_days;
+        ++month;
+    }
+    if (month > 12u) return 0;
+    time->year = (int)year;
+    time->month = (int)month;
+    time->day = (int)days + 1;
+    time->hour = (int)(seconds / 3600ULL);
+    seconds %= 3600ULL;
+    time->minute = (int)(seconds / 60ULL);
+    time->second = (int)(seconds % 60ULL);
+    return 1;
+}
+
+int x509_check_validity_at(const x509_cert_t* cert, u64 unix_time)
+{
+    x509_time_t now;
+    if (!cert || !x509_time_from_unix(unix_time, &now))
+        return X509_ERR_EXPIRED;
+    if (x509_time_cmp(&now, &cert->not_before) < 0 ||
+        x509_time_cmp(&now, &cert->not_after) > 0)
+        return X509_ERR_EXPIRED;
+    return X509_OK;
+}
+
 static char x509_ascii_lower(char c)
 {
     if (c >= 'A' && c <= 'Z') return (char)(c + ('a' - 'A'));

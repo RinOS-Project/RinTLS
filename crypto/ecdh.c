@@ -485,15 +485,29 @@ int x25519_ecdh(u8* shared_secret,
                 const u8* private_key,
                 const u8* peer_public)
 {
-    int ret = x25519_scalarmult(shared_secret, private_key, peer_public);
+    u8 zero[32] = {0};
+    int ret;
+
+    /* The caller may reuse this buffer after an error, so never leave a
+     * previous shared secret in it. */
+    if (!shared_secret) return ECDH_ERR_INVALID;
+    rintls_secure_zero(shared_secret, X25519_KEY_SIZE);
+
+    if (!private_key || !peer_public) return ECDH_ERR_INVALID;
+
+    ret = x25519_scalarmult(shared_secret, private_key, peer_public);
+    if (ret != ECDH_OK) {
+        rintls_secure_zero(shared_secret, X25519_KEY_SIZE);
+        return ret;
+    }
 
     /* 全ゼロチェック (low-order point対策) */
-    u8 zero[32] = {0};
-    if (rintls_secure_cmp(shared_secret, zero, 32)) {
+    if (rintls_secure_cmp(shared_secret, zero, X25519_KEY_SIZE)) {
+        rintls_secure_zero(shared_secret, X25519_KEY_SIZE);
         return ECDH_ERR_POINT;
     }
 
-    return ret;
+    return ECDH_OK;
 }
 
 /* ═══════════════════════════════════════

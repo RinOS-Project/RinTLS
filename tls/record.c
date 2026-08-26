@@ -753,7 +753,7 @@ int tls_record_recv(tls_record_ctx_t* ctx,
     ctx->plaintext_len = 0;
     ctx->plaintext_pos = 0;
 
-retry_recv:
+retry_recv:;
     int record_len = tls_record_recv_raw(ctx, &outer_type, &version, record, sizeof(record));
     if (record_len < 0) return record_len;
 

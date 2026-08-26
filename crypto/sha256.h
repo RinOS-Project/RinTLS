@@ -8,6 +8,10 @@
 
 #include "../platform/rin_platform.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define SHA256_DIGEST_SIZE  32
 #define SHA256_BLOCK_SIZE   64
 
@@ -52,5 +56,9 @@ void sha512_init(sha512_ctx* ctx);
 void sha512_update(sha512_ctx* ctx, const u8* data, rin_size_t len);
 void sha512_final(sha512_ctx* ctx, u8* digest);
 void sha512(const u8* data, rin_size_t len, u8* digest);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* RINTLS_SHA256_H */

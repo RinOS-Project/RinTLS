@@ -211,6 +211,13 @@ void tls_handshake_set_trust_anchor_verifier(tls_handshake_ctx_t* ctx,
     ctx->trust_anchor_opaque = opaque;
 }
 
+void tls_handshake_set_trusted_time(tls_handshake_ctx_t* ctx,
+                                    u64 trusted_unix_time)
+{
+    if (!ctx) return;
+    ctx->trusted_unix_time = trusted_unix_time;
+}
+
 /* ═══════════════════════════════════════
  * Transcript Hash
  * ═══════════════════════════════════════ */
@@ -324,7 +331,7 @@ void tls_transcript_hash(tls_handshake_ctx_t* ctx, u8* hash)
  * ═══════════════════════════════════════ */
 
 /* Note: volatile prevents compiler optimizations that cause incorrect results */
-static void tls13_hkdf_expand_label(const u8* secret, rin_size_t secret_len,
+static void tls13_hkdf_expand_label(const u8* secret,
                                      const u8* label, rin_size_t label_len,
                                      const u8* context, rin_size_t context_len,
                                      u8* out, rin_size_t out_len)
@@ -880,7 +887,7 @@ int tls13_derive_handshake_keys(tls_handshake_ctx_t* ctx)
     {
         u8 es_copy[32], eh_copy[32], tmp[32];
         for (i = 0; i < 32; i++) { es_copy[i] = early_secret[i]; eh_copy[i] = empty_hash[i]; }
-        tls13_hkdf_expand_label(es_copy, 32,
+        tls13_hkdf_expand_label(es_copy,
                                  TLS13_LABEL_DERIVED, 7,
                                  eh_copy, 32,
                                  tmp, 32);
@@ -902,7 +909,7 @@ int tls13_derive_handshake_keys(tls_handshake_ctx_t* ctx)
     {
         u8 tr_copy[32];
         for (i = 0; i < 32; i++) tr_copy[i] = transcript[i];
-        tls13_hkdf_expand_label(ctx->handshake_secret, 32,
+        tls13_hkdf_expand_label(ctx->handshake_secret,
                                  TLS13_LABEL_C_HS_TRAFFIC, 12,
                                  tr_copy, 32,
                                  ctx->client_handshake_traffic_secret, 32);
@@ -912,7 +919,7 @@ int tls13_derive_handshake_keys(tls_handshake_ctx_t* ctx)
     {
         u8 tr_copy[32];
         for (i = 0; i < 32; i++) tr_copy[i] = transcript[i];
-        tls13_hkdf_expand_label(ctx->handshake_secret, 32,
+        tls13_hkdf_expand_label(ctx->handshake_secret,
                                  TLS13_LABEL_S_HS_TRAFFIC, 12,
                                  tr_copy, 32,
                                  ctx->server_handshake_traffic_secret, 32);
@@ -924,11 +931,11 @@ int tls13_derive_handshake_keys(tls_handshake_ctx_t* ctx)
 
     {
         u8 tmp_key[16], tmp_iv[12];
-        tls13_hkdf_expand_label(ctx->server_handshake_traffic_secret, 32,
+        tls13_hkdf_expand_label(ctx->server_handshake_traffic_secret,
                                  TLS13_LABEL_KEY, 3, RIN_NULL, 0,
                                  tmp_key, 16);
         for (i = 0; i < 16; i++) server_key[i] = tmp_key[i];
-        tls13_hkdf_expand_label(ctx->server_handshake_traffic_secret, 32,
+        tls13_hkdf_expand_label(ctx->server_handshake_traffic_secret,
                                  TLS13_LABEL_IV, 2, RIN_NULL, 0,
                                  tmp_iv, 12);
         for (i = 0; i < 12; i++) server_iv[i] = tmp_iv[i];
@@ -936,11 +943,11 @@ int tls13_derive_handshake_keys(tls_handshake_ctx_t* ctx)
 
     {
         u8 tmp_key[16], tmp_iv[12];
-        tls13_hkdf_expand_label(ctx->client_handshake_traffic_secret, 32,
+        tls13_hkdf_expand_label(ctx->client_handshake_traffic_secret,
                                  TLS13_LABEL_KEY, 3, RIN_NULL, 0,
                                  tmp_key, 16);
         for (i = 0; i < 16; i++) client_key[i] = tmp_key[i];
-        tls13_hkdf_expand_label(ctx->client_handshake_traffic_secret, 32,
+        tls13_hkdf_expand_label(ctx->client_handshake_traffic_secret,
                                  TLS13_LABEL_IV, 2, RIN_NULL, 0,
                                  tmp_iv, 12);
         for (i = 0; i < 12; i++) client_iv[i] = tmp_iv[i];
@@ -978,7 +985,7 @@ int tls13_derive_application_keys(tls_handshake_ctx_t* ctx)
     {
         u8 eh_copy[32], tmp[32];
         for (i = 0; i < 32; i++) eh_copy[i] = empty_hash[i];
-        tls13_hkdf_expand_label(ctx->handshake_secret, 32,
+        tls13_hkdf_expand_label(ctx->handshake_secret,
                                  TLS13_LABEL_DERIVED, 7,
                                  eh_copy, 32,
                                  tmp, 32);
@@ -1006,7 +1013,7 @@ int tls13_derive_application_keys(tls_handshake_ctx_t* ctx)
     {
         u8 ms_copy[32];
         for (i = 0; i < 32; i++) ms_copy[i] = master_secret[i];
-        tls13_hkdf_expand_label(ms_copy, 32,
+        tls13_hkdf_expand_label(ms_copy,
                                  TLS13_LABEL_C_AP_TRAFFIC, 12,
                                  ctx->server_finished_transcript, 32,
                                  ctx->client_application_traffic_secret, 32);
@@ -1015,7 +1022,7 @@ int tls13_derive_application_keys(tls_handshake_ctx_t* ctx)
     {
         u8 ms_copy[32];
         for (i = 0; i < 32; i++) ms_copy[i] = master_secret[i];
-        tls13_hkdf_expand_label(ms_copy, 32,
+        tls13_hkdf_expand_label(ms_copy,
                                  TLS13_LABEL_S_AP_TRAFFIC, 12,
                                  ctx->server_finished_transcript, 32,
                                  ctx->server_application_traffic_secret, 32);
@@ -1027,11 +1034,11 @@ int tls13_derive_application_keys(tls_handshake_ctx_t* ctx)
 
     {
         u8 tmp_key[16], tmp_iv[12];
-        tls13_hkdf_expand_label(ctx->server_application_traffic_secret, 32,
+        tls13_hkdf_expand_label(ctx->server_application_traffic_secret,
                                  TLS13_LABEL_KEY, 3, RIN_NULL, 0,
                                  tmp_key, 16);
         for (i = 0; i < 16; i++) server_key[i] = tmp_key[i];
-        tls13_hkdf_expand_label(ctx->server_application_traffic_secret, 32,
+        tls13_hkdf_expand_label(ctx->server_application_traffic_secret,
                                  TLS13_LABEL_IV, 2, RIN_NULL, 0,
                                  tmp_iv, 12);
         for (i = 0; i < 12; i++) server_iv[i] = tmp_iv[i];
@@ -1039,11 +1046,11 @@ int tls13_derive_application_keys(tls_handshake_ctx_t* ctx)
 
     {
         u8 tmp_key[16], tmp_iv[12];
-        tls13_hkdf_expand_label(ctx->client_application_traffic_secret, 32,
+        tls13_hkdf_expand_label(ctx->client_application_traffic_secret,
                                  TLS13_LABEL_KEY, 3, RIN_NULL, 0,
                                  tmp_key, 16);
         for (i = 0; i < 16; i++) client_key[i] = tmp_key[i];
-        tls13_hkdf_expand_label(ctx->client_application_traffic_secret, 32,
+        tls13_hkdf_expand_label(ctx->client_application_traffic_secret,
                                  TLS13_LABEL_IV, 2, RIN_NULL, 0,
                                  tmp_iv, 12);
         for (i = 0; i < 12; i++) client_iv[i] = tmp_iv[i];
@@ -1076,7 +1083,7 @@ int tls_recv_encrypted_extensions(tls_handshake_ctx_t* ctx)
     u8 msg[16384];  /* TLS_MAX_RECORD_SIZE */
     u8 content_type;
 
-retry_recv:
+retry_recv:;
     int len = tls_record_recv(ctx->record, &content_type, msg, sizeof(msg));
     if (len < 0) return tls_handshake_map_io_error(len);
 
@@ -1218,6 +1225,13 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
             chain_err = TLS_HS_ERR_CERTIFICATE;
             break;
         }
+        if ((ctx->trusted_unix_time != 0u
+                 ? x509_check_validity_at(cur, ctx->trusted_unix_time)
+                 : x509_check_validity(cur)) != X509_OK) {
+            rintls_debug("[TLS] Certificate is not within its validity period\n");
+            chain_err = TLS_HS_ERR_CERTIFICATE;
+            break;
+        }
 
         if (cert_index == 0) {
             if (ctx->server_name[0] != '\0' &&
@@ -1226,12 +1240,6 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
                 chain_err = TLS_HS_ERR_HOSTNAME;
                 break;
             }
-            if (x509_check_validity(cur) != X509_OK) {
-                rintls_debug("[TLS] Certificate is not within its validity period\n");
-                chain_err = TLS_HS_ERR_CERTIFICATE;
-                break;
-            }
-
             /* CertificateVerify/ServerKeyExchangeの署名検証用に公開鍵を保持 */
             if (cur->key_type == X509_KEY_RSA) {
                 ctx->server_key_type = 0;
@@ -1466,7 +1474,7 @@ int tls_recv_finished(tls_handshake_ctx_t* ctx)
          * 一時バッファに出力してからvolatileにコピー */
         {
             u8 tmp_key[32];
-            tls13_hkdf_expand_label(ctx->server_handshake_traffic_secret, 32,
+            tls13_hkdf_expand_label(ctx->server_handshake_traffic_secret,
                                      TLS13_LABEL_FINISHED, 8,
                                      RIN_NULL, 0,
                                      tmp_key, 32);
@@ -1553,7 +1561,7 @@ int tls_send_finished(tls_handshake_ctx_t* ctx)
     if (ctx->is_tls13) {
         tls_transcript_hash(ctx, ctx->server_finished_transcript);
 
-        tls13_hkdf_expand_label(ctx->client_handshake_traffic_secret, 32,
+        tls13_hkdf_expand_label(ctx->client_handshake_traffic_secret,
                                  TLS13_LABEL_FINISHED, 8,
                                  RIN_NULL, 0,
                                  finished_key, 32);

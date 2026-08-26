@@ -39,6 +39,7 @@ struct rintls_ctx {
     /* 設定 */
     char hostname[256];
     u32 options;
+    u64 trusted_unix_time;
     rintls_trust_anchor* trust_anchors;
     u32 trust_anchor_count;
     rintls_trust_store* shared_trust_store;
@@ -46,6 +47,8 @@ struct rintls_ctx {
     /* 状態 */
     int connected;
     int last_error;
+    int handshake_started;
+    int peer_verified;
 
     /* I/O */
     rintls_send_func send_func;
@@ -59,11 +62,16 @@ struct rintls_ctx {
 #define RINTLS_MAX_TRUST_BUNDLE_BYTES (4u * 1024u * 1024u)
 
 static int rintls_verify_against_anchors(rintls_trust_anchor* anchor,
-                                         const x509_cert_t* chain_top)
+                                         const x509_cert_t* chain_top,
+                                         u64 trusted_unix_time)
 {
     for (; anchor; anchor = anchor->next) {
         x509_cert_t* trusted = &anchor->certificate;
-        if (!trusted->is_ca || x509_check_validity(trusted) != X509_OK) continue;
+        int validity = trusted_unix_time != 0u
+                           ? x509_check_validity_at(trusted,
+                                                    trusted_unix_time)
+                           : x509_check_validity(trusted);
+        if (!trusted->is_ca || validity != X509_OK) continue;
 
         if (chain_top->raw_len == trusted->raw_len &&
             chain_top->raw_len != 0 &&
@@ -93,11 +101,13 @@ static int rintls_verify_chain_top(void* opaque, const x509_cert_t* chain_top)
     rintls_ctx* ctx = (rintls_ctx*)opaque;
     if (!ctx || !chain_top) return 0;
 
-    if (rintls_verify_against_anchors(ctx->trust_anchors, chain_top))
+    if (rintls_verify_against_anchors(ctx->trust_anchors, chain_top,
+                                      ctx->trusted_unix_time))
         return 1;
     if (ctx->shared_trust_store &&
         rintls_verify_against_anchors(ctx->shared_trust_store->trust_anchors,
-                                      chain_top)) {
+                                      chain_top,
+                                      ctx->trusted_unix_time)) {
         return 1;
     }
     return 0;
@@ -162,14 +172,31 @@ void rintls_free(rintls_ctx* ctx)
 
 int rintls_set_hostname(rintls_ctx* ctx, const char* hostname)
 {
-    if (!ctx || !hostname) return RINTLS_ERR_MEMORY;
-
     rin_size_t len = 0;
-    while (hostname[len] && len < sizeof(ctx->hostname) - 1) {
-        ctx->hostname[len] = hostname[len];
-        len++;
+    rin_size_t label_start = 0;
+    if (!ctx || !hostname) return RINTLS_ERR_MEMORY;
+    if (ctx->handshake_started) return RINTLS_ERR_HANDSHAKE;
+    while (hostname[len] != '\0' && len < 254u) ++len;
+    if (len == 0u || len > 253u || hostname[len] != '\0')
+        return RINTLS_ERR_HOSTNAME;
+    for (rin_size_t index = 0u; index <= len; ++index) {
+        char value = hostname[index];
+        if (index != len && value != '.') {
+            int alpha = (value >= 'a' && value <= 'z') ||
+                        (value >= 'A' && value <= 'Z');
+            int digit = value >= '0' && value <= '9';
+            if (!alpha && !digit && value != '-')
+                return RINTLS_ERR_HOSTNAME;
+            continue;
+        }
+        if (index == label_start || index - label_start > 63u ||
+            hostname[label_start] == '-' || hostname[index - 1u] == '-')
+            return RINTLS_ERR_HOSTNAME;
+        label_start = index + 1u;
     }
-    ctx->hostname[len] = '\0';
+
+    rintls_memset(ctx->hostname, 0, sizeof(ctx->hostname));
+    rintls_memcpy(ctx->hostname, hostname, len);
 
     tls_handshake_set_server_name(&ctx->handshake, hostname);
 
@@ -198,6 +225,7 @@ int rintls_set_io(rintls_ctx* ctx,
 int rintls_set_options(rintls_ctx* ctx, u32 options)
 {
     if (!ctx) return RINTLS_ERR_MEMORY;
+    if (ctx->handshake_started) return RINTLS_ERR_HANDSHAKE;
 #if !defined(RINTLS_ENABLE_INSECURE_VERIFY_NONE)
     if ((options & RINTLS_OPT_VERIFY_NONE) != 0) {
         ctx->last_error = RINTLS_ERR_CERTIFICATE;
@@ -206,6 +234,17 @@ int rintls_set_options(rintls_ctx* ctx, u32 options)
 #endif
     ctx->options = options;
     ctx->handshake.verify_none = (options & RINTLS_OPT_VERIFY_NONE) ? 1 : 0;
+    return RINTLS_OK;
+}
+
+int rintls_set_trusted_time(rintls_ctx* ctx, u64 trusted_unix_time)
+{
+    if (!ctx) return RINTLS_ERR_MEMORY;
+    if (ctx->handshake_started) return RINTLS_ERR_HANDSHAKE;
+    if (trusted_unix_time == 0u || trusted_unix_time > 253402300799ULL)
+        return RINTLS_ERR_CERTIFICATE;
+    ctx->trusted_unix_time = trusted_unix_time;
+    tls_handshake_set_trusted_time(&ctx->handshake, trusted_unix_time);
     return RINTLS_OK;
 }
 
@@ -256,6 +295,7 @@ void rintls_clear_trust_anchors(rintls_ctx* ctx)
         ctx->shared_trust_store = RIN_NULL;
     }
     tls_handshake_set_trust_anchor_verifier(&ctx->handshake, 0, RIN_NULL);
+    ctx->peer_verified = 0;
 }
 
 u32 rintls_trust_anchor_count(rintls_ctx* ctx)
@@ -311,7 +351,7 @@ int rintls_add_trust_anchor_der(rintls_ctx* ctx,
                                 rin_size_t certificate_len)
 {
     int result;
-    if (!ctx) return RINTLS_ERR_CERTIFICATE;
+    if (!ctx || ctx->handshake_started) return RINTLS_ERR_CERTIFICATE;
     if (rintls_trust_anchor_count(ctx) >= RINTLS_MAX_TRUST_ANCHORS)
         return RINTLS_ERR_MEMORY;
     result = rintls_add_anchor_to_list(&ctx->trust_anchors,
@@ -378,7 +418,8 @@ invalid:
 
 int rintls_set_trust_store(rintls_ctx* ctx, rintls_trust_store* store)
 {
-    if (!ctx || !store || store->trust_anchor_count == 0)
+    if (!ctx || ctx->handshake_started || !store ||
+        store->trust_anchor_count == 0)
         return RINTLS_ERR_CERTIFICATE;
 
     rintls_trust_store_retain(store);
@@ -402,6 +443,18 @@ int rintls_load_trust_store(rintls_ctx* ctx,
     result = rintls_set_trust_store(ctx, store);
     rintls_trust_store_release(store);
     return result;
+}
+
+static void rintls_mark_connected(rintls_ctx* ctx)
+{
+    ctx->connected = 1;
+    ctx->peer_verified =
+        ctx->handshake.verify_none == 0 && ctx->hostname[0] != '\0' &&
+        ctx->trusted_unix_time != 0u &&
+        rintls_trust_anchor_count(ctx) != 0u &&
+        ctx->handshake.server_cert != RIN_NULL &&
+        ctx->handshake.server_cert_len != 0u;
+    ctx->last_error = RINTLS_OK;
 }
 
 /* ═══════════════════════════════════════
@@ -430,6 +483,8 @@ int rintls_handshake_step(rintls_ctx* ctx)
 
     if (!ctx) return RINTLS_ERR_MEMORY;
     if (!ctx->send_func || !ctx->recv_func) return RINTLS_ERR_IO;
+    ctx->handshake_started = 1;
+    ctx->peer_verified = 0;
 
     switch (ctx->handshake.state) {
     case TLS_STATE_INIT:
@@ -492,8 +547,7 @@ int rintls_handshake_step(rintls_ctx* ctx)
         }
         break;
     case TLS_STATE_CONNECTED:
-        ctx->connected = 1;
-        ctx->last_error = RINTLS_OK;
+        rintls_mark_connected(ctx);
         return RINTLS_OK;
     default:
         ret = TLS_HS_ERR_UNEXPECTED;
@@ -501,8 +555,7 @@ int rintls_handshake_step(rintls_ctx* ctx)
     }
 
     if (ret == TLS_HS_ERR_OK && ctx->handshake.state == TLS_STATE_CONNECTED) {
-        ctx->connected = 1;
-        ctx->last_error = RINTLS_OK;
+        rintls_mark_connected(ctx);
         return RINTLS_OK;
     }
 
@@ -614,6 +667,7 @@ int rintls_close(rintls_ctx* ctx)
         tls_record_close(&ctx->record);
         ctx->connected = 0;
     }
+    ctx->peer_verified = 0;
     rintls_release_owned_io(ctx);
 
     return RINTLS_OK;
@@ -684,6 +738,32 @@ int rintls_get_error(rintls_ctx* ctx)
 {
     if (!ctx) return RINTLS_ERR_MEMORY;
     return ctx->last_error;
+}
+
+int rintls_get_peer_evidence(rintls_ctx* ctx,
+                             rintls_peer_evidence* evidence)
+{
+    rin_size_t hostname_len = 0u;
+    if (evidence) rintls_memset(evidence, 0, sizeof(*evidence));
+    if (!ctx || !evidence || !ctx->connected || !ctx->peer_verified ||
+        ctx->handshake.server_cert == RIN_NULL ||
+        ctx->handshake.server_cert_len == 0u)
+        return RINTLS_ERR_CERTIFICATE;
+    while (ctx->hostname[hostname_len] != '\0' &&
+           hostname_len < sizeof(evidence->peer_dns_name) - 1u)
+        ++hostname_len;
+    if (hostname_len == 0u || ctx->hostname[hostname_len] != '\0')
+        return RINTLS_ERR_HOSTNAME;
+    evidence->struct_size = (u32)sizeof(*evidence);
+    evidence->version = RINTLS_PEER_EVIDENCE_VERSION;
+    evidence->evidence_flags = RINTLS_PEER_EVIDENCE_REQUIRED;
+    evidence->tls_version = (u32)ctx->handshake.version;
+    evidence->cipher_suite = (u32)ctx->handshake.cipher_suite;
+    evidence->trusted_unix_time = ctx->trusted_unix_time;
+    sha256(ctx->handshake.server_cert, ctx->handshake.server_cert_len,
+           evidence->peer_certificate_sha256);
+    rintls_memcpy(evidence->peer_dns_name, ctx->hostname, hostname_len);
+    return RINTLS_OK;
 }
 
 const char* rintls_strerror(int error)

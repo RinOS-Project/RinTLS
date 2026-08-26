@@ -6,21 +6,28 @@
 #ifndef RINTLS_PLATFORM_H
 #define RINTLS_PLATFORM_H
 
+#include <stddef.h>
 #include "../rintls_config.h"
 
 /* Basic Types */
-#ifndef RINTLS_SKIP_BASIC_TYPEDEFS
+#if !defined(RINTLS_SKIP_BASIC_TYPEDEFS) && !defined(_RIN_TYPES_DEFINED)
+#define _RIN_TYPES_DEFINED
 #ifdef __cplusplus
 /* C++ embedders in RinOS (Ladybird/AK) already provide u8/u16/u32/u64 and signed variants. */
 #else
-typedef unsigned char       u8;
-typedef unsigned short      u16;
-typedef unsigned int        u32;
-typedef unsigned long long  u64;
-typedef signed char         i8;
-typedef signed short        i16;
-typedef signed int          i32;
-typedef signed long long    i64;
+/* Fixed-width aliases must remain type-identical to the kernel headers even
+ * for a freestanding LP64 Clang syntax check.  `unsigned long long` has the
+ * right width there but is not `uint64_t`, which makes pointer interfaces
+ * incompatible. */
+#include <stdint.h>
+typedef uint8_t              u8;
+typedef uint16_t             u16;
+typedef uint32_t             u32;
+typedef uint64_t             u64;
+typedef int8_t               i8;
+typedef int16_t              i16;
+typedef int32_t              i32;
+typedef int64_t              i64;
 #endif
 #endif
 
@@ -32,7 +39,6 @@ typedef signed long long    i64;
 #if RIN_FREESTANDING
 typedef u32 rin_size_t;
 #else
-#include <stddef.h>
 typedef size_t rin_size_t;
 #endif
 
@@ -42,7 +48,7 @@ typedef size_t rin_size_t;
 extern void* platform_memset(void* dst, int val, u32 n);
 extern void* platform_memcpy(void* dst, const void* src, u32 n);
 extern int   platform_memcmp(const void* s1, const void* s2, u32 n);
-extern void* platform_kmalloc(u32 size);
+extern void* platform_kmalloc(size_t size);
 extern void  platform_kfree(void* ptr);
 
 #define rintls_memset   platform_memset
@@ -154,7 +160,16 @@ static inline int rintls_get_random(u8* buf, rin_size_t len) {
     return 0;
 #endif
 #else
-    return getrandom(buf, len, 0) == (ssize_t)len ? 0 : -1;
+    rin_size_t off = 0;
+    while (off < len) {
+        ssize_t n = getrandom(buf + off, len - off, 0);
+        /* A short read is valid for getrandom().  Never expose partially
+         * initialized key material: complete it or fail closed. */
+        if (n <= 0)
+            return -1;
+        off += (rin_size_t)n;
+    }
+    return 0;
 #endif
 }
 #endif
@@ -188,8 +203,8 @@ extern void platform_serial_hex(u32 val);
 #define rintls_debug_hex(val) printf("0x%08X", (unsigned int)(val))
 #endif
 #else
-#define rintls_debug(msg) ((void)0)
-#define rintls_debug_hex(val) ((void)0)
+#define rintls_debug(msg) ((void)sizeof(msg))
+#define rintls_debug_hex(val) ((void)sizeof(val))
 #endif
 
 /* Endianness Conversion */
