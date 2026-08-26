@@ -11,7 +11,10 @@ there is no provider-local PRNG fallback.
 
 The native Ladybird CTest targets `rintls-modern-backend` and
 `rintls-modern-random-failclose` respectively cover the real provider
-operations and forced CSPRNG failure. The latter compiles a test-only
+operations and forced CSPRNG failure. `rintls-modern-libcrypto` additionally
+drives the public Ladybird `LibCrypto` RSA API through OAEP, PKCS#1 v1.5, and
+PSS round trips and rejects tampered signatures; it does not use raw-RSA
+success fallbacks. The latter compiles a test-only
 freestanding boundary and verifies that randomized operations clear every
 caller-visible seed/output buffer before returning an error. It does not ship
 in a RinOS image. Every modern/PQC output buffer must be disjoint from the

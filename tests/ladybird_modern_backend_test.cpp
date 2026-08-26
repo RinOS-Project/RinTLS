@@ -8,6 +8,9 @@
 #include <LibCrypto/Curves/SECPxxxr1.h>
 #include <LibCrypto/PK/MLDSA.h>
 #include <LibCrypto/PK/MLKEM.h>
+#include <LibCrypto/PK/RSA.h>
+
+#include <string.h>
 
 static constexpr u8 message[] {
     0x52, 0x69, 0x6e, 0x4f, 0x53, 0x20, 0x72, 0x69,
@@ -155,6 +158,75 @@ static bool test_mlkem(Crypto::PK::MLKEMSize size, u8 domain)
     return !implicit_rejection_key.is_error() && implicit_rejection_key.value() != result.shared_key;
 }
 
+static bool test_rsa_webcrypto_algorithms()
+{
+    static constexpr u8 plaintext[] {
+        0x52, 0x69, 0x6e, 0x4f, 0x53, 0x20, 0x72, 0x69,
+        0x6e, 0x74, 0x6c, 0x73, 0x20, 0x52, 0x53, 0x41,
+    };
+    static constexpr u8 label[] { 0x72, 0x69, 0x6e, 0x2d, 0x6c, 0x61, 0x62, 0x65, 0x6c };
+
+    auto key_pair = Crypto::PK::RSA::generate_key_pair(2048u);
+    if (key_pair.is_error())
+        return false;
+    auto pair = key_pair.release_value();
+    if (pair.public_key.length() != 256u || pair.private_key.length() != 256u)
+        return false;
+    auto public_valid = pair.public_key.is_valid();
+    auto private_valid = pair.private_key.is_valid();
+    if (public_valid.is_error() || private_valid.is_error() || !public_valid.value() || !private_valid.value())
+        return false;
+
+    Crypto::PK::RSA raw { pair };
+    if (!raw.encrypt(plaintext).is_error() || !raw.sign(plaintext).is_error())
+        return false;
+
+    Crypto::PK::RSA_OAEP_EME oaep_encrypt { Crypto::Hash::HashKind::SHA256, pair.public_key };
+    Crypto::PK::RSA_OAEP_EME oaep_decrypt { Crypto::Hash::HashKind::SHA256, pair.private_key };
+    oaep_encrypt.set_label(label);
+    oaep_decrypt.set_label(label);
+    auto ciphertext = oaep_encrypt.encrypt(plaintext);
+    if (ciphertext.is_error() || ciphertext.value().size() != pair.public_key.length())
+        return false;
+    auto recovered = oaep_decrypt.decrypt(ciphertext.value());
+    if (recovered.is_error() || recovered.value().size() != sizeof(plaintext)
+        || memcmp(recovered.value().data(), plaintext, sizeof(plaintext)) != 0)
+        return false;
+
+    Crypto::PK::RSA_PKCS1_EMSA pkcs1_signer { Crypto::Hash::HashKind::SHA256, pair.private_key };
+    Crypto::PK::RSA_PKCS1_EMSA pkcs1_verifier { Crypto::Hash::HashKind::SHA256, pair.public_key };
+    auto pkcs1_signature = pkcs1_signer.sign(plaintext);
+    if (pkcs1_signature.is_error() || pkcs1_signature.value().size() != pair.public_key.length())
+        return false;
+    auto pkcs1_verified = pkcs1_verifier.verify(plaintext, pkcs1_signature.value());
+    if (pkcs1_verified.is_error() || !pkcs1_verified.value())
+        return false;
+    auto tampered_pkcs1_signature = ByteBuffer::copy(pkcs1_signature.value());
+    if (tampered_pkcs1_signature.is_error())
+        return false;
+    tampered_pkcs1_signature.value()[0] ^= 0x80;
+    auto pkcs1_rejected = pkcs1_verifier.verify(plaintext, tampered_pkcs1_signature.value());
+    if (pkcs1_rejected.is_error() || pkcs1_rejected.value())
+        return false;
+
+    Crypto::PK::RSA_PSS_EMSA pss_signer { Crypto::Hash::HashKind::SHA256, pair.private_key };
+    Crypto::PK::RSA_PSS_EMSA pss_verifier { Crypto::Hash::HashKind::SHA256, pair.public_key };
+    pss_signer.set_salt_length(32);
+    pss_verifier.set_salt_length(32);
+    auto pss_signature = pss_signer.sign(plaintext);
+    if (pss_signature.is_error() || pss_signature.value().size() != pair.public_key.length())
+        return false;
+    auto pss_verified = pss_verifier.verify(plaintext, pss_signature.value());
+    if (pss_verified.is_error() || !pss_verified.value())
+        return false;
+    auto tampered_pss_signature = ByteBuffer::copy(pss_signature.value());
+    if (tampered_pss_signature.is_error())
+        return false;
+    tampered_pss_signature.value()[0] ^= 0x80;
+    auto pss_rejected = pss_verifier.verify(plaintext, tampered_pss_signature.value());
+    return !pss_rejected.is_error() && !pss_rejected.value();
+}
+
 int main()
 {
     static constexpr u8 ed448_context[] { 0x72, 0x69, 0x6e };
@@ -183,6 +255,9 @@ int main()
         return 10;
     if (!test_mlkem(Crypto::PK::MLKEMSize::MLKEM1024, 0x60))
         return 11;
+
+    if (!test_rsa_webcrypto_algorithms())
+        return 12;
 
     return 0;
 }
