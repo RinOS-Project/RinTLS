@@ -108,12 +108,9 @@ static bool test_x448()
     return !bob_shared.is_error() && alice_shared.value() == bob_shared.value();
 }
 
-static bool test_mldsa(Crypto::PK::MLDSASize size, u8 domain)
+static bool test_mldsa_key_pair(Crypto::PK::MLDSASize size, ByteBuffer seed)
 {
-    auto seed = deterministic_seed(domain, 32);
-    if (seed.is_error())
-        return false;
-    auto key_pair = Crypto::PK::MLDSA::generate_key_pair(size, seed.release_value());
+    auto key_pair = Crypto::PK::MLDSA::generate_key_pair(size, move(seed));
     if (key_pair.is_error())
         return false;
     auto pair = key_pair.release_value();
@@ -132,12 +129,22 @@ static bool test_mldsa(Crypto::PK::MLDSASize size, u8 domain)
     return !rejected.is_error() && !rejected.value();
 }
 
-static bool test_mlkem(Crypto::PK::MLKEMSize size, u8 domain)
+static bool test_mldsa(Crypto::PK::MLDSASize size, u8 domain)
 {
-    auto seed = deterministic_seed(domain, 64);
+    auto seed = deterministic_seed(domain, 32);
     if (seed.is_error())
         return false;
-    auto key_pair = Crypto::PK::MLKEM::generate_key_pair(size, seed.release_value());
+    if (!test_mldsa_key_pair(size, seed.release_value()))
+        return false;
+
+    // An empty seed is the public LibCrypto request for provider-owned
+    // entropy. Exercise it separately from the deterministic import path.
+    return test_mldsa_key_pair(size, {});
+}
+
+static bool test_mlkem_key_pair(Crypto::PK::MLKEMSize size, ByteBuffer seed)
+{
+    auto key_pair = Crypto::PK::MLKEM::generate_key_pair(size, move(seed));
     if (key_pair.is_error())
         return false;
     auto pair = key_pair.release_value();
@@ -156,6 +163,19 @@ static bool test_mlkem(Crypto::PK::MLKEMSize size, u8 domain)
     invalid_ciphertext[0] ^= 0x01;
     auto implicit_rejection_key = Crypto::PK::MLKEM::decapsulate(size, pair.private_key, move(invalid_ciphertext));
     return !implicit_rejection_key.is_error() && implicit_rejection_key.value() != result.shared_key;
+}
+
+static bool test_mlkem(Crypto::PK::MLKEMSize size, u8 domain)
+{
+    auto seed = deterministic_seed(domain, 64);
+    if (seed.is_error())
+        return false;
+    if (!test_mlkem_key_pair(size, seed.release_value()))
+        return false;
+
+    // See test_mldsa(): key generation without a supplied seed must traverse
+    // the only allowed RinTLS entropy boundary, not a provider-local PRNG.
+    return test_mlkem_key_pair(size, {});
 }
 
 static bool test_rsa_webcrypto_algorithms()

@@ -11,10 +11,14 @@ there is no provider-local PRNG fallback.
 
 The native Ladybird CTest targets `rintls-modern-backend` and
 `rintls-modern-random-failclose` respectively cover the real provider
-operations and forced CSPRNG failure. `rintls-modern-libcrypto` additionally
-drives the public Ladybird `LibCrypto` RSA API through OAEP, PKCS#1 v1.5, and
-PSS round trips and rejects tampered signatures; it does not use raw-RSA
-success fallbacks. The latter compiles a test-only
+operations and forced CSPRNG failure. `rintls-modern-libcrypto` drives the
+public Ladybird `LibCrypto` APIs for P-384/P-521, Ed25519/Ed448, X448,
+ML-DSA-44/65/87, ML-KEM-512/768/1024, and RSA OAEP/PKCS#1 v1.5/PSS. For every
+PQC parameter set it exercises both a supplied deterministic seed and empty
+seed key generation, the latter proving that LibCrypto reaches the provider's
+sole RinTLS CSPRNG boundary. It rejects tampered signatures and malformed
+ML-KEM ciphertext without using raw-RSA or synthetic-success fallbacks. The
+random-failure target compiles a test-only
 freestanding boundary and verifies that randomized operations clear every
 caller-visible seed/output buffer before returning an error. It does not ship
 in a RinOS image. Every modern/PQC output buffer must be disjoint from the
@@ -35,6 +39,7 @@ shared secret produced by a low-order peer input and clear their caller output
 before returning an error. RSA-OAEP, RSASSA-PKCS1-v1_5, and RSA-PSS apply the
 same boundary to their result bytes and result-length record: neither may
 overlap a key, label, message, ciphertext, signature, or each other. An
-overlap is rejected without modifying caller storage. RSA key generation and
-browser-process/QEMU WebCrypto coverage remain unfinished; see the root
-`TODO.md`.
+overlap is rejected without modifying caller storage. The bounded BearSSL i31
+RSA key-generation archive path is covered by `rintls-rsa-webcrypto`; Browser
+process/QEMU WebCrypto coverage remains unfinished, so see the root `TODO.md`
+for the still-unchecked P1.4 evidence.
