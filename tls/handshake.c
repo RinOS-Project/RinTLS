@@ -1266,7 +1266,13 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
                 chain_err = TLS_HS_ERR_CERTIFICATE;
                 break;
             }
-            if (x509_check_validity(cur) != X509_OK) {
+            /* Every certificate in the chain must be checked against the
+             * same authenticated clock snapshot as the leaf.  Falling back
+             * to x509_check_validity() here would consult ambient wall-clock
+             * state for intermediates and make the TLS evidence mixed. */
+            if ((ctx->trusted_unix_time != 0u
+                     ? x509_check_validity_at(cur, ctx->trusted_unix_time)
+                     : x509_check_validity(cur)) != X509_OK) {
                 rintls_debug("[TLS] Intermediate certificate is not within its validity period\n");
                 chain_err = TLS_HS_ERR_CERTIFICATE;
                 break;
