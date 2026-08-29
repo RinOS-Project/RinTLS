@@ -109,6 +109,8 @@ typedef enum {
     TLS_STATE_ENCRYPTED_EXTENSIONS,     /* TLS 1.3 */
     TLS_STATE_CERTIFICATE_RECEIVED,
     TLS_STATE_CERTIFICATE_VERIFY,       /* TLS 1.3 */
+    TLS_STATE_CLIENT_CERTIFICATE,       /* TLS 1.3 mutual authentication */
+    TLS_STATE_CLIENT_CERTIFICATE_VERIFY,
     TLS_STATE_SERVER_KEY_EXCHANGE,      /* TLS 1.2 */
     TLS_STATE_SERVER_HELLO_DONE,        /* TLS 1.2 */
     TLS_STATE_CLIENT_KEY_EXCHANGE_SENT, /* TLS 1.2 */
@@ -124,10 +126,18 @@ typedef enum {
  * ハンドシェイクコンテキスト
  * ═══════════════════════════════════════ */
 
-#define TLS_MAX_PENDING_HANDSHAKE_SEND  4096
+#define TLS_MAX_PENDING_HANDSHAKE_SEND  16384
+#define TLS_MAX_CLIENT_CERTIFICATE_CHAIN (16u * 1024u)
+#define TLS_MAX_CLIENT_SIGNATURE_BYTES 512u
+#define TLS_MAX_CLIENT_CERTIFICATE_BYTES (16u * 1024u)
 
 typedef int (*tls_trust_anchor_verify_func)(void* opaque,
                                             const x509_cert_t* chain_top);
+
+typedef int (*tls_client_certificate_sign_func)(
+    void* opaque, u16 signature_scheme, const u8* message,
+    rin_size_t message_len, u8* signature, rin_size_t signature_capacity,
+    rin_size_t* signature_len);
 
 typedef struct {
     /* 状態 */
@@ -193,6 +203,17 @@ typedef struct {
     int server_ecdsa_curve;
     int server_key_type;    /* 0=RSA, 1=ECDSA */
 
+    /* Mutual-TLS client identity.  certificate_list is the bounded wire
+     * certificate_list (3-byte total length + DER entries); the private key
+     * remains behind the signer callback. */
+    u8* client_certificate_list;
+    rin_size_t client_certificate_list_len;
+    tls_client_certificate_sign_func client_certificate_sign;
+    void* client_certificate_sign_opaque;
+    int client_certificate_requested;
+    int client_certificate_sent;
+    u16 client_signature_scheme;
+
     /* SNI */
     char server_name[256];
 
@@ -235,6 +256,13 @@ void tls_handshake_set_trust_anchor_verifier(tls_handshake_ctx_t* ctx,
 void tls_handshake_set_trusted_time(tls_handshake_ctx_t* ctx,
                                     u64 trusted_unix_time);
 
+int tls_handshake_set_client_certificate(
+    tls_handshake_ctx_t* ctx, const void* certificate_list,
+    rin_size_t certificate_list_len,
+    tls_client_certificate_sign_func signer, void* signer_opaque);
+
+int tls_handshake_client_certificate_requested(const tls_handshake_ctx_t* ctx);
+
 /* ═══════════════════════════════════════
  * ハンドシェイク実行
  * ═══════════════════════════════════════ */
@@ -259,6 +287,13 @@ int tls_recv_server_hello(tls_handshake_ctx_t* ctx);
 
 /* Certificateを受信・処理 */
 int tls_recv_certificate(tls_handshake_ctx_t* ctx);
+
+/* Parse an optional CertificateRequest and emit the client Certificate and
+ * CertificateVerify messages when a configured signer is available. */
+int tls_recv_certificate_request(tls_handshake_ctx_t* ctx,
+                                 const u8* msg, rin_size_t len);
+int tls_send_client_certificate(tls_handshake_ctx_t* ctx);
+int tls_send_client_certificate_verify(tls_handshake_ctx_t* ctx);
 
 /* CertificateVerifyを受信・処理 (TLS 1.3) */
 int tls_recv_certificate_verify(tls_handshake_ctx_t* ctx);

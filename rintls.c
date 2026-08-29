@@ -248,6 +248,27 @@ int rintls_set_trusted_time(rintls_ctx* ctx, u64 trusted_unix_time)
     return RINTLS_OK;
 }
 
+int rintls_set_client_certificate(
+    rintls_ctx* ctx, const void* certificate_list,
+    rin_size_t certificate_list_len,
+    rintls_client_certificate_sign_func signer, void* signer_opaque)
+{
+    if (!ctx) return RINTLS_ERR_MEMORY;
+    if (ctx->handshake_started) return RINTLS_ERR_HANDSHAKE;
+    int result = tls_handshake_set_client_certificate(
+        &ctx->handshake, certificate_list, certificate_list_len,
+        (tls_client_certificate_sign_func)signer, signer_opaque);
+    if (result == TLS_HS_ERR_OK) return RINTLS_OK;
+    if (result == TLS_HS_ERR_IO) return RINTLS_ERR_MEMORY;
+    if (result == TLS_HS_ERR_UNEXPECTED) return RINTLS_ERR_HANDSHAKE;
+    return RINTLS_ERR_CERTIFICATE;
+}
+
+int rintls_client_certificate_requested(const rintls_ctx* ctx)
+{
+    return ctx ? tls_handshake_client_certificate_requested(&ctx->handshake) : 0;
+}
+
 static void rintls_free_anchor_list(rintls_trust_anchor* anchor)
 {
     while (anchor) {
@@ -500,6 +521,12 @@ int rintls_handshake_step(rintls_ctx* ctx)
         break;
     case TLS_STATE_ENCRYPTED_EXTENSIONS:
         ret = tls_recv_certificate(&ctx->handshake);
+        break;
+    case TLS_STATE_CLIENT_CERTIFICATE:
+        ret = tls_send_client_certificate(&ctx->handshake);
+        break;
+    case TLS_STATE_CLIENT_CERTIFICATE_VERIFY:
+        ret = tls_send_client_certificate_verify(&ctx->handshake);
         break;
     case TLS_STATE_CERTIFICATE_RECEIVED:
         ret = ctx->handshake.is_tls13

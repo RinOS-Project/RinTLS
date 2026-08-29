@@ -74,6 +74,20 @@ typedef struct rintls_peer_evidence {
 typedef struct rintls_ctx rintls_ctx;
 typedef struct rintls_trust_store rintls_trust_store;
 
+/* Client-certificate signing is deliberately callback based.  The private
+ * key never enters rintls or crosses the transport boundary; the owner keeps
+ * it in a key-capable process and signs only the bounded TLS transcript that
+ * rintls supplies.  The callback returns the TLS signature bytes (not a
+ * CertificateVerify message). */
+typedef int (*rintls_client_certificate_sign_func)(
+    void* opaque, u16 signature_scheme, const u8* message,
+    rin_size_t message_len, u8* signature, rin_size_t signature_capacity,
+    rin_size_t* signature_len);
+
+#define RINTLS_MAX_CLIENT_CERTIFICATE_CHAIN (16u * 1024u)
+#define RINTLS_MAX_CLIENT_CERTIFICATE_BYTES (16u * 1024u)
+#define RINTLS_MAX_CLIENT_SIGNATURE_BYTES  512u
+
 /* ═══════════════════════════════════════
  * I/Oコールバック型
  * ═══════════════════════════════════════ */
@@ -141,6 +155,19 @@ int rintls_set_options(rintls_ctx* ctx, u32 options);
 /* Bind authenticated wall-clock state to this handshake.  Configuration is
  * immutable after the first handshake step. */
 int rintls_set_trusted_time(rintls_ctx* ctx, u64 trusted_unix_time);
+
+/* Configure a bounded TLS Certificate message certificate_list for mutual
+ * TLS.  The input is the wire-format certificate_list: a 3-byte total length
+ * followed by repeated 3-byte DER length + DER certificate records.  The
+ * signer is invoked after the server's CertificateRequest and must be
+ * authenticated by the caller; passing a raw private key is unsupported. */
+int rintls_set_client_certificate(
+    rintls_ctx* ctx, const void* certificate_list,
+    rin_size_t certificate_list_len,
+    rintls_client_certificate_sign_func signer, void* signer_opaque);
+
+/* Whether the peer requested a client certificate during this handshake. */
+int rintls_client_certificate_requested(const rintls_ctx* ctx);
 
 /* Add one DER-encoded CA certificate to this context's trust store. */
 int rintls_add_trust_anchor_der(rintls_ctx* ctx,
