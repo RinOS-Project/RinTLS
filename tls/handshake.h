@@ -203,9 +203,10 @@ typedef struct {
     int server_ecdsa_curve;
     int server_key_type;    /* 0=RSA, 1=ECDSA */
 
-    /* Mutual-TLS client identity.  certificate_list is the bounded wire
-     * certificate_list (3-byte total length + DER entries); the private key
-     * remains behind the signer callback. */
+    /* Mutual-TLS client identity.  certificate_list is the bounded TLS 1.3
+     * wire certificate_list (3-byte total length + CertificateEntry records
+     * with DER and extensions lengths); the private key remains behind the
+     * signer callback. */
     u8* client_certificate_list;
     rin_size_t client_certificate_list_len;
     tls_client_certificate_sign_func client_certificate_sign;

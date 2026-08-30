@@ -257,6 +257,13 @@ int tls_handshake_set_client_certificate(
             (size_t)(end - p) < cert_len)
             return TLS_HS_ERR_CERTIFICATE;
         p += cert_len;
+        if ((size_t)(end - p) < 2u)
+            return TLS_HS_ERR_CERTIFICATE;
+        u16 extensions_len = read_u16(p);
+        p += 2u;
+        if ((size_t)(end - p) < extensions_len)
+            return TLS_HS_ERR_CERTIFICATE;
+        p += extensions_len;
         ++count;
         if (count > RINTLS_MAX_CERT_CHAIN)
             return TLS_HS_ERR_CERTIFICATE;

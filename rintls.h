@@ -156,9 +156,10 @@ int rintls_set_options(rintls_ctx* ctx, u32 options);
  * immutable after the first handshake step. */
 int rintls_set_trusted_time(rintls_ctx* ctx, u64 trusted_unix_time);
 
-/* Configure a bounded TLS Certificate message certificate_list for mutual
+/* Configure a bounded TLS 1.3 Certificate message certificate_list for mutual
  * TLS.  The input is the wire-format certificate_list: a 3-byte total length
- * followed by repeated 3-byte DER length + DER certificate records.  The
+ * followed by repeated 3-byte DER length + DER certificate + 2-byte
+ * CertificateEntry extensions length (and extension bytes) records.  The
  * signer is invoked after the server's CertificateRequest and must be
  * authenticated by the caller; passing a raw private key is unsupported. */
 int rintls_set_client_certificate(
