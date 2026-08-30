@@ -60,6 +60,21 @@ static u32 read_u24(const u8* p)
     return ((u32)p[0] << 16) | ((u32)p[1] << 8) | p[2];
 }
 
+static int tls_client_certificate_extensions_valid(const u8* bytes,
+                                                   u16 size)
+{
+    u16 offset = 0u;
+    if (!bytes && size != 0u) return 0;
+    while (offset < size) {
+        if ((u16)(size - offset) < 4u) return 0;
+        u16 extension_size = read_u16(bytes + offset + 2u);
+        offset = (u16)(offset + 4u);
+        if (extension_size > (u16)(size - offset)) return 0;
+        offset = (u16)(offset + extension_size);
+    }
+    return offset == size;
+}
+
 static int tls_handshake_map_io_error(int ret)
 {
     if (ret == TLS_ERR_WANT_READ) return TLS_HS_ERR_WANT_READ;
@@ -262,6 +277,8 @@ int tls_handshake_set_client_certificate(
         u16 extensions_len = read_u16(p);
         p += 2u;
         if ((size_t)(end - p) < extensions_len)
+            return TLS_HS_ERR_CERTIFICATE;
+        if (!tls_client_certificate_extensions_valid(p, extensions_len))
             return TLS_HS_ERR_CERTIFICATE;
         p += extensions_len;
         ++count;
