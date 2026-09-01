@@ -144,6 +144,9 @@ typedef struct {
     rin_size_t plaintext_len;      /* バッファ内のデータ長 */
     rin_size_t plaintext_pos;      /* 読み取り位置 */
     u8 plaintext_content_type;     /* コンテンツタイプ */
+    /* Handshake callers may need raw fragments rather than record-layer
+     * message splitting while reassembling a message across records. */
+    u8 handshake_fragment_passthrough;
 
     /* ソケット送受信コールバック */
     int (*send_func)(void* ctx, const u8* data, rin_size_t len);

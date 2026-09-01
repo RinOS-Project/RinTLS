@@ -127,6 +127,7 @@ typedef enum {
  * ═══════════════════════════════════════ */
 
 #define TLS_MAX_PENDING_HANDSHAKE_SEND  16384
+#define TLS_MAX_PENDING_HANDSHAKE_RECV  16384
 #define TLS_MAX_CLIENT_CERTIFICATE_CHAIN (16u * 1024u)
 #define TLS_MAX_CLIENT_SIGNATURE_BYTES 512u
 #define TLS_MAX_CLIENT_CERTIFICATE_BYTES (16u * 1024u)
@@ -230,6 +231,11 @@ typedef struct {
     u8 pending_send_next_state;
     u8 pending_send_msg[TLS_MAX_PENDING_HANDSHAKE_SEND];
     rin_size_t pending_send_msg_len;
+
+    /* 受信途中のハンドシェイクメッセージ。TLS record境界で分割された
+     * header／payloadを、bounded ownerへ再構成してから各stateへ渡す。 */
+    u8 pending_recv_msg[TLS_MAX_PENDING_HANDSHAKE_RECV];
+    rin_size_t pending_recv_msg_len;
 
     /* エラー情報 */
     int last_error;

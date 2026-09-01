@@ -710,7 +710,9 @@ int tls_record_recv(tls_record_ctx_t* ctx,
         u8* buf_ptr = ctx->plaintext_buffer + ctx->plaintext_pos;
 
         /* ハンドシェイクメッセージの場合は1つずつ返す */
-        if (ctx->plaintext_content_type == TLS_CONTENT_HANDSHAKE && remaining >= 4) {
+        if (!ctx->handshake_fragment_passthrough &&
+            ctx->plaintext_content_type == TLS_CONTENT_HANDSHAKE &&
+            remaining >= 4) {
             u32 msg_len = ((u32)buf_ptr[1] << 16) |
                           ((u32)buf_ptr[2] << 8) |
                           ((u32)buf_ptr[3]);
@@ -871,7 +873,8 @@ retry_recv:;
 
         /* TLS 1.3 ハンドシェイク: 1つのメッセージのみを返す */
         /* 複数のハンドシェイクメッセージが1つの暗号化レコードに含まれる場合がある */
-        if (inner_type == TLS_CONTENT_HANDSHAKE && plaintext_len >= 4) {
+        if (!ctx->handshake_fragment_passthrough &&
+            inner_type == TLS_CONTENT_HANDSHAKE && plaintext_len >= 4) {
             /* ハンドシェイクヘッダー: type(1) + length(3) */
             u32 msg_len = ((u32)ctx->plaintext_buffer[1] << 16) |
                           ((u32)ctx->plaintext_buffer[2] << 8) |

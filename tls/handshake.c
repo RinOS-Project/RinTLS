@@ -82,6 +82,68 @@ static int tls_handshake_map_io_error(int ret)
     return TLS_HS_ERR_IO;
 }
 
+/* Receive exactly one complete handshake message, even when its four-byte
+ * header or payload is split over several TLS records.  The record layer
+ * normally returns one complete handshake message at a time; temporarily
+ * disable that policy here so a continuation fragment cannot be mistaken for
+ * a fresh header.  The bounded context buffer also lets callers retry after
+ * WANT_READ without losing the already received prefix. */
+static int tls_handshake_recv_message(tls_handshake_ctx_t* ctx,
+                                      u8* output, rin_size_t output_capacity,
+                                      u8* output_type)
+{
+    if (!ctx || !ctx->record || !output || output_capacity < 4u ||
+        output_capacity > sizeof(ctx->pending_recv_msg)) {
+        return TLS_HS_ERR_UNEXPECTED;
+    }
+
+    rin_size_t used = ctx->pending_recv_msg_len;
+    for (;;) {
+        rin_size_t request = output_capacity - used;
+        if (used >= 4u) {
+            u32 payload_len = read_u24(ctx->pending_recv_msg + 1u);
+            if (payload_len > output_capacity - 4u) {
+                ctx->pending_recv_msg_len = 0u;
+                return TLS_HS_ERR_UNEXPECTED;
+            }
+            rin_size_t message_len = (rin_size_t)payload_len + 4u;
+            if (used == message_len) {
+                rintls_memcpy(output, ctx->pending_recv_msg, message_len);
+                if (output_type) *output_type = ctx->pending_recv_msg[0];
+                ctx->pending_recv_msg_len = 0u;
+                return (int)message_len;
+            }
+            if (used > message_len) {
+                ctx->pending_recv_msg_len = 0u;
+                return TLS_HS_ERR_UNEXPECTED;
+            }
+            request = message_len - used;
+        }
+
+        if (request == 0u || used > sizeof(ctx->pending_recv_msg) - request) {
+            ctx->pending_recv_msg_len = 0u;
+            return TLS_HS_ERR_UNEXPECTED;
+        }
+
+        u8 content_type = 0u;
+        u8 previous_passthrough = ctx->record->handshake_fragment_passthrough;
+        ctx->record->handshake_fragment_passthrough = 1u;
+        int received = tls_record_recv(ctx->record, &content_type,
+                                       ctx->pending_recv_msg + used, request);
+        ctx->record->handshake_fragment_passthrough = previous_passthrough;
+        if (received < 0) {
+            ctx->pending_recv_msg_len = used;
+            return tls_handshake_map_io_error(received);
+        }
+        if (content_type != TLS_CONTENT_HANDSHAKE || received == 0) {
+            ctx->pending_recv_msg_len = 0u;
+            return TLS_HS_ERR_UNEXPECTED;
+        }
+        used += (rin_size_t)received;
+        ctx->pending_recv_msg_len = used;
+    }
+}
+
 #define TLS_PENDING_SEND_NONE                0
 #define TLS_PENDING_SEND_CLIENT_HELLO        1
 #define TLS_PENDING_SEND_FINISHED            2
@@ -1166,38 +1228,16 @@ int tls13_derive_application_keys(tls_handshake_ctx_t* ctx)
 int tls_recv_encrypted_extensions(tls_handshake_ctx_t* ctx)
 {
     u8 msg[16384];  /* TLS_MAX_RECORD_SIZE */
-    u8 content_type;
-
-retry_recv:;
-    int len = tls_record_recv(ctx->record, &content_type, msg, sizeof(msg));
-    if (len < 0) return tls_handshake_map_io_error(len);
-
-    /* TLS 1.3 middlebox互換性: ChangeCipherSpecを無視 */
-    if (content_type == TLS_CONTENT_CHANGE_CIPHER_SPEC) {
-        rintls_debug("[TLS] Ignoring ChangeCipherSpec (middlebox compat)\n");
-        goto retry_recv;
-    }
-
-    if (content_type != TLS_CONTENT_HANDSHAKE) {
-        rintls_debug("[TLS] EncryptedExtensions: unexpected type=");
-        rintls_debug_hex(content_type);
-        rintls_debug("\n");
+    u8 message_type = 0u;
+    int len = tls_handshake_recv_message(ctx, msg, sizeof(msg),
+                                         &message_type);
+    if (len < 0) return len;
+    if (message_type != TLS_HS_ENCRYPTED_EXTENSIONS) {
         return TLS_HS_ERR_UNEXPECTED;
     }
 
-    if (len < 4 || msg[0] != TLS_HS_ENCRYPTED_EXTENSIONS) {
-        return TLS_HS_ERR_UNEXPECTED;
-    }
-
-    /* 長さ検証: 受信したデータがメッセージ全体を含むか確認 */
     u32 msg_len = read_u24(msg + 1);
-    if ((u32)len < 4 + msg_len) {
-        rintls_debug("[TLS] EncryptedExtensions fragmented! len=");
-        rintls_debug_hex((u32)len);
-        rintls_debug(" expected=");
-        rintls_debug_hex(4 + msg_len);
-        rintls_debug("\n");
-        /* TODO: ハンドシェイク断片化対応 - 現在はエラー */
+    if ((u32)len != 4u + msg_len) {
         return TLS_HS_ERR_UNEXPECTED;
     }
 
@@ -1375,39 +1415,24 @@ int tls_send_client_certificate_verify(tls_handshake_ctx_t* ctx)
 int tls_recv_certificate(tls_handshake_ctx_t* ctx)
 {
     u8 msg[16384];  /* TLS_MAX_RECORD_SIZE */
-    u8 content_type;
-
-    int len = tls_record_recv(ctx->record, &content_type, msg, sizeof(msg));
-    if (len < 0) return tls_handshake_map_io_error(len);
-
-    if (content_type != TLS_CONTENT_HANDSHAKE) {
-        return TLS_HS_ERR_UNEXPECTED;
-    }
-
-    if (len < 4) {
-        return TLS_HS_ERR_UNEXPECTED;
-    }
+    u8 message_type = 0u;
+    int len = tls_handshake_recv_message(ctx, msg, sizeof(msg),
+                                         &message_type);
+    if (len < 0) return len;
 
     /* TLS 1.3 sends CertificateRequest between EncryptedExtensions and the
      * server Certificate.  Consume it as its own transcript message and let
      * the state machine emit the client authentication messages before
      * reading the server certificate. */
-    if (msg[0] == TLS_HS_CERTIFICATE_REQUEST && ctx->is_tls13) {
+    if (message_type == TLS_HS_CERTIFICATE_REQUEST && ctx->is_tls13) {
         return tls_recv_certificate_request(ctx, msg, (rin_size_t)len);
     }
-    if (msg[0] != TLS_HS_CERTIFICATE) {
+    if (message_type != TLS_HS_CERTIFICATE) {
         return TLS_HS_ERR_UNEXPECTED;
     }
 
-    /* 長さ検証: 受信したデータがメッセージ全体を含むか確認 */
     u32 msg_len = read_u24(msg + 1);
-    if ((u32)len < 4 + msg_len) {
-        rintls_debug("[TLS] Certificate fragmented! len=");
-        rintls_debug_hex((u32)len);
-        rintls_debug(" expected=");
-        rintls_debug_hex(4 + msg_len);
-        rintls_debug("\n");
-        /* TODO: ハンドシェイク断片化対応 - 現在はエラー */
+    if ((u32)len != 4u + msg_len) {
         return TLS_HS_ERR_UNEXPECTED;
     }
 
@@ -1564,28 +1589,16 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
 int tls_recv_certificate_verify(tls_handshake_ctx_t* ctx)
 {
     u8 msg[16384];  /* TLS_MAX_RECORD_SIZE */
-    u8 content_type;
-
-    int len = tls_record_recv(ctx->record, &content_type, msg, sizeof(msg));
-    if (len < 0) return tls_handshake_map_io_error(len);
-
-    if (content_type != TLS_CONTENT_HANDSHAKE) {
+    u8 message_type = 0u;
+    int len = tls_handshake_recv_message(ctx, msg, sizeof(msg),
+                                         &message_type);
+    if (len < 0) return len;
+    if (message_type != TLS_HS_CERTIFICATE_VERIFY) {
         return TLS_HS_ERR_UNEXPECTED;
     }
 
-    if (len < 4 || msg[0] != TLS_HS_CERTIFICATE_VERIFY) {
-        return TLS_HS_ERR_UNEXPECTED;
-    }
-
-    /* 長さ検証: 受信したデータがメッセージ全体を含むか確認 */
     u32 msg_len = read_u24(msg + 1);
-    if ((u32)len < 4 + msg_len) {
-        rintls_debug("[TLS] CertificateVerify fragmented! len=");
-        rintls_debug_hex((u32)len);
-        rintls_debug(" expected=");
-        rintls_debug_hex(4 + msg_len);
-        rintls_debug("\n");
-        /* TODO: ハンドシェイク断片化対応 - 現在はエラー */
+    if ((u32)len != 4u + msg_len) {
         return TLS_HS_ERR_UNEXPECTED;
     }
 
@@ -1684,35 +1697,19 @@ int tls_recv_certificate_verify(tls_handshake_ctx_t* ctx)
 int tls_recv_finished(tls_handshake_ctx_t* ctx)
 {
     u8 msg[16384];  /* TLS_MAX_RECORD_SIZE - multiple msgs may be in one record */
-    u8 content_type;
-    int len;
-
-    /* Both TLS 1.2 and TLS 1.3 use tls_record_recv which handles decryption */
-    len = tls_record_recv(ctx->record, &content_type, msg, sizeof(msg));
-
-    if (len < 0) return tls_handshake_map_io_error(len);
-
-    if (content_type != TLS_CONTENT_HANDSHAKE) {
-        return TLS_HS_ERR_UNEXPECTED;
-    }
-
-    if (len < 4 || msg[0] != TLS_HS_FINISHED) {
+    u8 message_type = 0u;
+    int len = tls_handshake_recv_message(ctx, msg, sizeof(msg),
+                                         &message_type);
+    if (len < 0) return len;
+    if (message_type != TLS_HS_FINISHED) {
         rintls_debug("[TLS] Expected Finished, got type=");
-        rintls_debug_hex(msg[0]);
+        rintls_debug_hex(message_type);
         rintls_debug("\n");
         return TLS_HS_ERR_UNEXPECTED;
     }
 
     u32 msg_len = read_u24(msg + 1);
-
-    /* 長さ検証: 受信したデータがメッセージ全体を含むか確認 */
-    if ((u32)len < 4 + msg_len) {
-        rintls_debug("[TLS] Finished fragmented! len=");
-        rintls_debug_hex((u32)len);
-        rintls_debug(" expected=");
-        rintls_debug_hex(4 + msg_len);
-        rintls_debug("\n");
-        /* TODO: ハンドシェイク断片化対応 - 現在はエラー */
+    if ((u32)len != 4u + msg_len) {
         return TLS_HS_ERR_UNEXPECTED;
     }
     if (msg_len != (ctx->is_tls13 ? 32u : 12u)) {
