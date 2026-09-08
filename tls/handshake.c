@@ -312,7 +312,9 @@ int tls_handshake_set_client_certificate(
     if (!ctx || !bytes || !signer || certificate_list_len < 3u ||
         certificate_list_len > TLS_MAX_CLIENT_CERTIFICATE_CHAIN)
         return TLS_HS_ERR_CERTIFICATE;
-    if (ctx->state != TLS_STATE_INIT || ctx->client_certificate_list)
+    if ((ctx->state != TLS_STATE_INIT &&
+         ctx->state != TLS_STATE_CLIENT_CERTIFICATE) ||
+        ctx->client_certificate_list)
         return TLS_HS_ERR_UNEXPECTED;
 
     u32 list_len = read_u24(bytes);

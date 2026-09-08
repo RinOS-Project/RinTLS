@@ -84,6 +84,13 @@ typedef int (*rintls_client_certificate_sign_func)(
     rin_size_t message_len, u8* signature, rin_size_t signature_capacity,
     rin_size_t* signature_len);
 
+/* Optional authenticated provider invoked exactly once after a TLS 1.3
+ * CertificateRequest is received. The provider must call
+ * rintls_set_client_certificate() with a validated public certificate_list
+ * and signer capability; private key material never enters RinTLS. */
+typedef int (*rintls_client_certificate_provider_func)(
+    rintls_ctx* ctx, void* opaque);
+
 #define RINTLS_MAX_CLIENT_CERTIFICATE_CHAIN (16u * 1024u)
 #define RINTLS_MAX_CLIENT_CERTIFICATE_BYTES (16u * 1024u)
 #define RINTLS_MAX_CLIENT_SIGNATURE_BYTES  512u
@@ -166,6 +173,11 @@ int rintls_set_client_certificate(
     rintls_ctx* ctx, const void* certificate_list,
     rin_size_t certificate_list_len,
     rintls_client_certificate_sign_func signer, void* signer_opaque);
+
+/* Bind a one-shot CertificateRequest provider before the handshake. */
+int rintls_set_client_certificate_provider(
+    rintls_ctx* ctx, rintls_client_certificate_provider_func provider,
+    void* provider_opaque);
 
 /* Whether the peer requested a client certificate during this handshake. */
 int rintls_client_certificate_requested(const rintls_ctx* ctx);

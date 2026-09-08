@@ -56,6 +56,10 @@ struct rintls_ctx {
     void* io_ctx;
     void* owned_io_ctx;
     int   owns_io_ctx;
+
+    rintls_client_certificate_provider_func client_certificate_provider;
+    void* client_certificate_provider_opaque;
+    int client_certificate_provider_called;
 };
 
 #define RINTLS_MAX_TRUST_ANCHORS 256u
@@ -254,7 +258,12 @@ int rintls_set_client_certificate(
     rintls_client_certificate_sign_func signer, void* signer_opaque)
 {
     if (!ctx) return RINTLS_ERR_MEMORY;
-    if (ctx->handshake_started) return RINTLS_ERR_HANDSHAKE;
+    /* A provider is admitted at the CertificateRequest state as well as
+     * during initial configuration. This is the only post-start mutation
+     * allowed by the handshake state machine. */
+    if (ctx->handshake_started &&
+        ctx->handshake.state != TLS_STATE_CLIENT_CERTIFICATE)
+        return RINTLS_ERR_HANDSHAKE;
     int result = tls_handshake_set_client_certificate(
         &ctx->handshake, certificate_list, certificate_list_len,
         (tls_client_certificate_sign_func)signer, signer_opaque);
@@ -262,6 +271,24 @@ int rintls_set_client_certificate(
     if (result == TLS_HS_ERR_IO) return RINTLS_ERR_MEMORY;
     if (result == TLS_HS_ERR_UNEXPECTED) return RINTLS_ERR_HANDSHAKE;
     return RINTLS_ERR_CERTIFICATE;
+}
+
+int rintls_set_client_certificate_provider(
+    rintls_ctx* ctx, rintls_client_certificate_provider_func provider,
+    void* provider_opaque)
+{
+    if (!ctx) return RINTLS_ERR_MEMORY;
+    if (ctx->handshake_started || ctx->client_certificate_provider_called)
+        return RINTLS_ERR_HANDSHAKE;
+    if (!provider) {
+        ctx->client_certificate_provider = RIN_NULL;
+        ctx->client_certificate_provider_opaque = RIN_NULL;
+        return RINTLS_OK;
+    }
+    ctx->client_certificate_provider = provider;
+    ctx->client_certificate_provider_opaque = provider_opaque;
+    ctx->client_certificate_provider_called = 0;
+    return RINTLS_OK;
 }
 
 int rintls_client_certificate_requested(const rintls_ctx* ctx)
@@ -489,6 +516,24 @@ int rintls_handshake(rintls_ctx* ctx)
 
     while (1) {
         int ret = rintls_handshake_step(ctx);
+        if (ret == RINTLS_ERR_WANT_READ &&
+            ctx->handshake.client_certificate_requested &&
+            !ctx->handshake.client_certificate_list &&
+            ctx->client_certificate_provider != RIN_NULL &&
+            !ctx->client_certificate_provider_called) {
+            ctx->client_certificate_provider_called = 1;
+            int provider_result = ctx->client_certificate_provider(
+                ctx, ctx->client_certificate_provider_opaque);
+            if (provider_result != RINTLS_OK) {
+                ctx->last_error = provider_result;
+                return provider_result;
+            }
+            if (!ctx->handshake.client_certificate_list) {
+                ctx->last_error = RINTLS_ERR_CERTIFICATE;
+                return RINTLS_ERR_CERTIFICATE;
+            }
+            continue;
+        }
         if (ret == RINTLS_OK) {
             return RINTLS_OK;
         }
