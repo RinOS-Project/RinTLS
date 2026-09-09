@@ -57,6 +57,30 @@ typedef struct {
  * largest RFC 8017 value for the key and hash. */
 int rintls_rsa_generate_keypair(u32 modulus_bits, u32 public_exponent,
                                 rintls_rsa_private_key* key_out);
+
+/* Raw RSA representatives and generic EMSA-PKCS1-v1_5 encoding.  These
+ * primitives are intentionally separate from the WebCrypto algorithm
+ * wrappers: callers must supply an exactly modulus-sized representative and
+ * receive an exactly modulus-sized result.  The provider validates the
+ * representative is below n, rejects all overlapping input/output ranges,
+ * and clears the declared output range on ordinary failure. */
+int rintls_rsa_raw_public(const rintls_rsa_public_key* public_key,
+                          const u8* input, rin_size_t input_len,
+                          u8* output, rin_size_t output_capacity,
+                          rin_size_t* output_len);
+int rintls_rsa_raw_private(const rintls_rsa_private_key* private_key,
+                           const u8* input, rin_size_t input_len,
+                           u8* output, rin_size_t output_capacity,
+                           rin_size_t* output_len);
+int rintls_rsa_emsa_pkcs1_encode(const u8* message, rin_size_t message_len,
+                                 rin_size_t modulus_len, u8* encoded,
+                                 rin_size_t encoded_capacity,
+                                 rin_size_t* encoded_len);
+int rintls_rsa_emsa_pkcs1_verify(const u8* message, rin_size_t message_len,
+                                 rin_size_t modulus_len,
+                                 const u8* encoded,
+                                 rin_size_t encoded_len);
+
 int rintls_rsa_oaep_encrypt(u32 hash_algorithm,
                             const rintls_rsa_public_key* public_key,
                             const u8* label, rin_size_t label_len,

@@ -105,6 +105,7 @@ static void test_oaep_and_pkcs1(void)
     rintls_rsa_private_key key;
     u8 ciphertext[RINTLS_RSA_MAX_MODULUS_BYTES];
     u8 plaintext[RINTLS_RSA_MAX_MODULUS_BYTES];
+    u8 compact_plaintext[32];
     u8 signature[RINTLS_RSA_MAX_MODULUS_BYTES];
     rin_size_t ciphertext_length = 0;
     rin_size_t plaintext_length = 0;
@@ -126,6 +127,28 @@ static void test_oaep_and_pkcs1(void)
     assert(plaintext_length == sizeof(message) - 1u);
     assert(memcmp(plaintext, message, plaintext_length) == 0);
 
+    /* Decryption output capacity describes the plaintext buffer, not the
+     * modulus-sized ciphertext scratch used internally by the provider. */
+    memset(compact_plaintext, 0xa5, sizeof(compact_plaintext));
+    plaintext_length = (rin_size_t)0xa5a5a5a5u;
+    assert(rintls_rsa_oaep_decrypt(RINTLS_RSA_HASH_SHA256, &key,
+                                   ciphertext, ciphertext_length, label,
+                                   sizeof(label) - 1u, compact_plaintext,
+                                   sizeof(compact_plaintext),
+                                   &plaintext_length) == 0);
+    assert(plaintext_length == sizeof(message) - 1u);
+    assert(memcmp(compact_plaintext, message, plaintext_length) == 0);
+
+    /* A capacity smaller than the recovered message remains failure-atomic. */
+    memset(compact_plaintext, 0xa5, sizeof(compact_plaintext));
+    plaintext_length = (rin_size_t)0xa5a5a5a5u;
+    assert(rintls_rsa_oaep_decrypt(RINTLS_RSA_HASH_SHA256, &key,
+                                   ciphertext, ciphertext_length, label,
+                                   sizeof(label) - 1u, compact_plaintext, 8u,
+                                   &plaintext_length) != 0);
+    assert(bytes_are_zero(compact_plaintext, 8u));
+    assert(plaintext_length == 0u);
+
     assert(rintls_rsa_pkcs1_sign(RINTLS_RSA_HASH_SHA256, &key, message,
                                  sizeof(message) - 1u, signature, sizeof(signature),
                                  &signature_length) == 0);
@@ -137,6 +160,69 @@ static void test_oaep_and_pkcs1(void)
     assert(rintls_rsa_pkcs1_verify(RINTLS_RSA_HASH_SHA256, &key.public_key,
                                    message, sizeof(message) - 1u, signature,
                                    signature_length) == RINTLS_RSA_VERIFY_INVALID);
+}
+
+static void test_raw_rsa_and_generic_emsa(void)
+{
+    rintls_rsa_private_key key;
+    u8 encoded[RINTLS_RSA_MAX_MODULUS_BYTES];
+    u8 signature[RINTLS_RSA_MAX_MODULUS_BYTES];
+    u8 recovered[RINTLS_RSA_MAX_MODULUS_BYTES];
+    u8 too_small[255];
+    u8 representative[RINTLS_RSA_MAX_MODULUS_BYTES];
+    rin_size_t encoded_length = 0;
+    rin_size_t signature_length = 0;
+    rin_size_t recovered_length = 0;
+    static const u8 message[] = "generic emsa payload";
+
+    test_random_mode = RANDOM_MODE_FIXED;
+    assert(rintls_rsa_generate_keypair(2048u, 65537u, &key) == 0);
+    assert(rintls_rsa_emsa_pkcs1_encode(
+               message, sizeof(message) - 1u, key.public_key.modulus_len,
+               encoded, sizeof(encoded), &encoded_length) == 0);
+    assert(encoded_length == key.public_key.modulus_len);
+    assert(rintls_rsa_emsa_pkcs1_verify(
+               message, sizeof(message) - 1u, key.public_key.modulus_len,
+               encoded, encoded_length) == RINTLS_RSA_VERIFY_VALID);
+    encoded[2] = 0u;
+    assert(rintls_rsa_emsa_pkcs1_verify(
+               message, sizeof(message) - 1u, key.public_key.modulus_len,
+               encoded, encoded_length) == RINTLS_RSA_VERIFY_INVALID);
+    encoded[2] = 0xffu;
+
+    assert(rintls_rsa_raw_private(&key, encoded, encoded_length, signature,
+                                  sizeof(signature), &signature_length) == 0);
+    assert(signature_length == key.public_key.modulus_len);
+    assert(rintls_rsa_raw_public(&key.public_key, signature, signature_length,
+                                 recovered, sizeof(recovered),
+                                 &recovered_length) == 0);
+    assert(recovered_length == encoded_length);
+    assert(memcmp(recovered, encoded, encoded_length) == 0);
+    assert(rintls_rsa_emsa_pkcs1_verify(
+               message, sizeof(message) - 1u, key.public_key.modulus_len,
+               recovered, recovered_length) == RINTLS_RSA_VERIFY_VALID);
+
+    memset(representative, 0xff, sizeof(representative));
+    memset(recovered, 0xa5, sizeof(recovered));
+    recovered_length = (rin_size_t)0xa5a5a5a5u;
+    assert(rintls_rsa_raw_public(&key.public_key, representative,
+                                 sizeof(representative), recovered,
+                                 sizeof(recovered), &recovered_length) != 0);
+    assert(bytes_are_zero(recovered, sizeof(recovered)));
+    assert(recovered_length == 0u);
+
+    memset(too_small, 0xa5, sizeof(too_small));
+    encoded_length = (rin_size_t)0xa5a5a5a5u;
+    assert(rintls_rsa_emsa_pkcs1_encode(
+               message, sizeof(message) - 1u, key.public_key.modulus_len,
+               too_small, sizeof(too_small), &encoded_length) != 0);
+    assert(bytes_are_zero(too_small, sizeof(too_small)));
+    assert(encoded_length == 0u);
+
+    assert(rintls_rsa_emsa_pkcs1_verify(
+               message, sizeof(message) - 1u, key.public_key.modulus_len,
+               encoded, key.public_key.modulus_len - 1u) ==
+           RINTLS_RSA_VERIFY_INVALID);
 }
 
 static void test_pss(void)
@@ -266,6 +352,7 @@ int main(void)
 {
     test_keygen_and_oaep_fail_closed();
     test_oaep_and_pkcs1();
+    test_raw_rsa_and_generic_emsa();
     test_pss();
     test_overlapping_result_buffers_are_immutable();
     puts("rsa_webcrypto_test: OK");

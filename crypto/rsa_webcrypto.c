@@ -133,6 +133,27 @@ static int rintls_rsa_public_key_is_valid(const rintls_rsa_public_key* key)
     return exponent >= 3u && (exponent & 1u) != 0;
 }
 
+static int rintls_rsa_representative_is_valid(
+    const rintls_rsa_public_key* key, const u8* representative,
+    rin_size_t representative_len)
+{
+    int less = 0;
+    int greater = 0;
+    rin_size_t index;
+
+    if (!key || !representative || representative_len != key->modulus_len)
+        return 0;
+    for (index = 0; index < representative_len; ++index) {
+        if (!less && !greater) {
+            if (representative[index] < key->modulus[index])
+                less = 1;
+            else if (representative[index] > key->modulus[index])
+                greater = 1;
+        }
+    }
+    return less;
+}
+
 static int rintls_rsa_public_key_to_bearssl(const rintls_rsa_public_key* key,
                                              rintls_bearssl_public_key* out)
 {
@@ -409,6 +430,176 @@ done:
     return result;
 }
 
+static int rintls_rsa_raw_output_is_writable(
+    u8* output, rin_size_t output_capacity, rin_size_t* output_len,
+    const void* key, rin_size_t key_size, const u8* input,
+    rin_size_t input_len)
+{
+    if (!output_len ||
+        !rintls_rsa_result_is_disjoint(output, output_capacity, output_len,
+                                       key, key_size, input, input_len,
+                                       NULL, 0u))
+        return 0;
+    *output_len = 0;
+    if (!rintls_rsa_output_is_valid(output, output_capacity))
+        return 0;
+    rintls_rsa_clear_output(output, output_capacity);
+    return 1;
+}
+
+int rintls_rsa_raw_public(const rintls_rsa_public_key* public_key,
+                          const u8* input, rin_size_t input_len,
+                          u8* output, rin_size_t output_capacity,
+                          rin_size_t* output_len)
+{
+    rintls_bearssl_public_key bearssl_public_key;
+    u8 work[RINTLS_RSA_MAX_MODULUS_BYTES];
+    int writable = 0;
+    int result = -1;
+
+    rintls_secure_zero(&bearssl_public_key, sizeof(bearssl_public_key));
+    rintls_secure_zero(work, sizeof(work));
+    if (!rintls_rsa_raw_output_is_writable(
+            output, output_capacity, output_len, public_key,
+            sizeof(*public_key), input, input_len))
+        goto done;
+    writable = 1;
+    if (rintls_rsa_public_key_to_bearssl(public_key, &bearssl_public_key) != 0 ||
+        !rintls_rsa_representative_is_valid(public_key, input, input_len) ||
+        output_capacity < public_key->modulus_len)
+        goto done;
+    rintls_memcpy(work, input, input_len);
+    if (br_rsa_i31_public(work, input_len, &bearssl_public_key.key) == 0)
+        goto done;
+    rintls_memcpy(output, work, input_len);
+    *output_len = input_len;
+    result = 0;
+
+done:
+    if (result != 0 && writable) {
+        rintls_rsa_clear_output(output, output_capacity);
+        *output_len = 0;
+    }
+    rintls_secure_zero(work, sizeof(work));
+    rintls_secure_zero(&bearssl_public_key, sizeof(bearssl_public_key));
+    return result;
+}
+
+int rintls_rsa_raw_private(const rintls_rsa_private_key* private_key,
+                           const u8* input, rin_size_t input_len,
+                           u8* output, rin_size_t output_capacity,
+                           rin_size_t* output_len)
+{
+    rintls_bearssl_private_key bearssl_private_key;
+    u8 work[RINTLS_RSA_MAX_MODULUS_BYTES];
+    int writable = 0;
+    int result = -1;
+
+    rintls_secure_zero(&bearssl_private_key, sizeof(bearssl_private_key));
+    rintls_secure_zero(work, sizeof(work));
+    if (!rintls_rsa_raw_output_is_writable(
+            output, output_capacity, output_len, private_key,
+            sizeof(*private_key), input, input_len))
+        goto done;
+    writable = 1;
+    if (rintls_rsa_private_key_to_bearssl(private_key,
+                                           &bearssl_private_key) != 0 ||
+        rintls_rsa_private_key_is_consistent(private_key,
+                                              &bearssl_private_key) != 0 ||
+        !rintls_rsa_representative_is_valid(&private_key->public_key, input,
+                                            input_len) ||
+        output_capacity < private_key->public_key.modulus_len)
+        goto done;
+    rintls_memcpy(work, input, input_len);
+    if (br_rsa_i31_private(work, &bearssl_private_key.key) == 0)
+        goto done;
+    rintls_memcpy(output, work, input_len);
+    *output_len = input_len;
+    result = 0;
+
+done:
+    if (result != 0 && writable) {
+        rintls_rsa_clear_output(output, output_capacity);
+        *output_len = 0;
+    }
+    rintls_secure_zero(work, sizeof(work));
+    rintls_secure_zero(&bearssl_private_key, sizeof(bearssl_private_key));
+    return result;
+}
+
+int rintls_rsa_emsa_pkcs1_encode(const u8* message, rin_size_t message_len,
+                                 rin_size_t modulus_len, u8* encoded,
+                                 rin_size_t encoded_capacity,
+                                 rin_size_t* encoded_len)
+{
+    rin_size_t padding_len;
+    int writable = 0;
+    int result = -1;
+
+    if (!encoded_len ||
+        !rintls_rsa_result_is_disjoint(encoded, encoded_capacity, encoded_len,
+                                       message, message_len, NULL, 0u,
+                                       NULL, 0u))
+        goto done;
+    writable = 1;
+    *encoded_len = 0;
+    if (!rintls_rsa_output_is_valid(encoded, encoded_capacity) ||
+        modulus_len < RINTLS_RSA_MIN_MODULUS_BITS / 8u ||
+        modulus_len > RINTLS_RSA_MAX_MODULUS_BYTES ||
+        !rintls_rsa_message_is_valid(message, message_len) ||
+        message_len > modulus_len - 11u || encoded_capacity < modulus_len)
+        goto done;
+    rintls_rsa_clear_output(encoded, encoded_capacity);
+    padding_len = modulus_len - message_len - 3u;
+    encoded[0] = 0;
+    encoded[1] = 1;
+    rintls_memset(encoded + 2u, 0xff, padding_len);
+    encoded[2u + padding_len] = 0;
+    rintls_memcpy(encoded + 3u + padding_len, message, message_len);
+    *encoded_len = modulus_len;
+    result = 0;
+
+done:
+    if (result != 0 && writable) {
+        rintls_rsa_clear_output(encoded, encoded_capacity);
+        *encoded_len = 0;
+    }
+    return result;
+}
+
+int rintls_rsa_emsa_pkcs1_verify(const u8* message, rin_size_t message_len,
+                                 rin_size_t modulus_len,
+                                 const u8* encoded,
+                                 rin_size_t encoded_len)
+{
+    rin_size_t padding_len;
+    rin_size_t message_offset;
+    rin_size_t index;
+
+    if (modulus_len < RINTLS_RSA_MIN_MODULUS_BITS / 8u ||
+        modulus_len > RINTLS_RSA_MAX_MODULUS_BYTES ||
+        encoded_len != modulus_len || !encoded ||
+        !rintls_rsa_message_is_valid(message, message_len) ||
+        message_len > modulus_len - 11u)
+        return RINTLS_RSA_VERIFY_INVALID;
+    if (encoded[0] != 0 || encoded[1] != 1)
+        return RINTLS_RSA_VERIFY_INVALID;
+    padding_len = modulus_len - message_len - 3u;
+    if (padding_len < 8u)
+        return RINTLS_RSA_VERIFY_INVALID;
+    for (index = 0; index < padding_len; ++index) {
+        if (encoded[2u + index] != 0xffu)
+            return RINTLS_RSA_VERIFY_INVALID;
+    }
+    message_offset = 3u + padding_len;
+    if (encoded[message_offset - 1u] != 0)
+        return RINTLS_RSA_VERIFY_INVALID;
+    return rintls_rsa_constant_time_diff(encoded + message_offset, message,
+                                         message_len) == 0
+        ? RINTLS_RSA_VERIFY_VALID
+        : RINTLS_RSA_VERIFY_INVALID;
+}
+
 int rintls_rsa_oaep_encrypt(u32 hash_algorithm,
                             const rintls_rsa_public_key* public_key,
                             const u8* label, rin_size_t label_len,
@@ -510,7 +701,7 @@ int rintls_rsa_oaep_decrypt(u32 hash_algorithm,
         rintls_rsa_private_key_is_consistent(private_key,
                                               &bearssl_private_key) != 0 ||
         encrypted_len != private_key->public_key.modulus_len ||
-        message_capacity < private_key->public_key.modulus_len)
+        message_capacity > RINTLS_RSA_MAX_MODULUS_BYTES)
         goto done;
     (void)oid;
     (void)digest_len;
@@ -520,7 +711,8 @@ int rintls_rsa_oaep_decrypt(u32 hash_algorithm,
     if (br_rsa_i31_oaep_decrypt(digest, label, label_len,
                                 &bearssl_private_key.key, work,
                                 &work_len) == 0 ||
-        work_len > RINTLS_RSA_MAX_MODULUS_BYTES)
+        work_len > RINTLS_RSA_MAX_MODULUS_BYTES ||
+        work_len > message_capacity)
         goto done;
     rintls_memcpy(message, work, work_len);
     *message_len = (rin_size_t)work_len;
