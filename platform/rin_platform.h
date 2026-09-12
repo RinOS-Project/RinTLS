@@ -9,6 +9,10 @@
 #include <stddef.h>
 #include "../rintls_config.h"
 
+#if defined(RINTLS_USE_COMMON_SECURE_MEMORY)
+#include "../../rinsecure/include/rinsecure/memory.h"
+#endif
+
 /* Basic Types */
 #if !defined(RINTLS_SKIP_BASIC_TYPEDEFS) && !defined(_RIN_TYPES_DEFINED)
 #define _RIN_TYPES_DEFINED
@@ -58,12 +62,17 @@ extern void  platform_kfree(void* ptr);
 #define rintls_mem_free platform_kfree  /* Internal use only - not public API */
 
 /* Secure memory clear */
+#if defined(RINTLS_USE_COMMON_SECURE_MEMORY)
+#define rintls_memzero       rin_secure_zero
+#define rintls_secure_zero   rin_secure_zero
+#else
 static inline void rintls_memzero(void* ptr, rin_size_t len) {
     volatile u8* p = (volatile u8*)ptr;
     while (len--) *p++ = 0;
 }
 
 #define rintls_secure_zero  rintls_memzero
+#endif
 
 #else
 /* Userspace - use standard library */
@@ -81,12 +90,18 @@ static inline void rintls_memzero(void* ptr, rin_size_t len) {
 #define rintls_malloc   malloc
 #define rintls_mem_free free
 
+/* Secure memory clear */
+#if defined(RINTLS_USE_COMMON_SECURE_MEMORY)
+#define rintls_memzero       rin_secure_zero
+#define rintls_secure_zero   rin_secure_zero
+#else
 static inline void rintls_memzero(void* ptr, rin_size_t len) {
     volatile unsigned char* p = (volatile unsigned char*)ptr;
     while (len--) *p++ = 0;
 }
 
 #define rintls_secure_zero  rintls_memzero
+#endif
 #endif
 
 /* Network Functions */
