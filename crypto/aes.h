@@ -10,6 +10,7 @@
 
 /* AES key sizes */
 #define AES128_KEY_SIZE     16
+#define AES192_KEY_SIZE     24
 #define AES256_KEY_SIZE     32
 #define AES_BLOCK_SIZE      16
 

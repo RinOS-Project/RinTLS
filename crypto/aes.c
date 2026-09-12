@@ -73,6 +73,9 @@ int aes_init(aes_ctx* ctx, const u8* key, int key_size) {
     if (key_size == 16) {
         ctx->nr = 10;
         nk = 4;
+    } else if (key_size == 24) {
+        ctx->nr = 12;
+        nk = 6;
     } else if (key_size == 32) {
         ctx->nr = 14;
         nk = 8;
