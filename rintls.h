@@ -39,6 +39,7 @@ extern "C" {
 #define RINTLS_ERR_WANT_READ    -10
 #define RINTLS_ERR_WANT_WRITE   -11
 #define RINTLS_ERR_TRUST        -12
+#define RINTLS_ERR_WANT_CREDENTIALS -13
 
 #define RINTLS_PEER_EVIDENCE_VERSION 0x00010000u
 #define RINTLS_PEER_EVIDENCE_CHAIN_VERIFIED 0x00000001u
@@ -168,7 +169,9 @@ int rintls_set_trusted_time(rintls_ctx* ctx, u64 trusted_unix_time);
  * followed by repeated 3-byte DER length + DER certificate + 2-byte
  * CertificateEntry extensions length (and extension bytes) records.  The
  * signer is invoked after the server's CertificateRequest and must be
- * authenticated by the caller; passing a raw private key is unsupported. */
+ * authenticated by the caller; passing a raw private key is unsupported.
+ * For TLS 1.3, a null list with length zero and a null signer explicitly
+ * declines the optional request and emits an empty Certificate message. */
 int rintls_set_client_certificate(
     rintls_ctx* ctx, const void* certificate_list,
     rin_size_t certificate_list_len,
@@ -181,6 +184,9 @@ int rintls_set_client_certificate_provider(
 
 /* Whether the peer requested a client certificate during this handshake. */
 int rintls_client_certificate_requested(const rintls_ctx* ctx);
+
+/* Whether the application has answered the client-certificate request. */
+int rintls_client_certificate_configured(const rintls_ctx* ctx);
 
 /* Add one DER-encoded CA certificate to this context's trust store. */
 int rintls_add_trust_anchor_der(rintls_ctx* ctx,

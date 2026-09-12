@@ -343,13 +343,24 @@ int tls_handshake_set_client_certificate(
     tls_client_certificate_sign_func signer, void* signer_opaque)
 {
     const u8* bytes = (const u8*)certificate_list;
-    if (!ctx || !bytes || !signer || certificate_list_len < 3u ||
-        certificate_list_len > TLS_MAX_CLIENT_CERTIFICATE_CHAIN)
+    if (!ctx || certificate_list_len > TLS_MAX_CLIENT_CERTIFICATE_CHAIN)
         return TLS_HS_ERR_CERTIFICATE;
     if ((ctx->state != TLS_STATE_INIT &&
          ctx->state != TLS_STATE_CLIENT_CERTIFICATE) ||
-        ctx->client_certificate_list)
+        ctx->client_certificate_list || ctx->client_certificate_declined)
         return TLS_HS_ERR_UNEXPECTED;
+
+    /* TLS 1.3 permits an optional CertificateRequest to be answered with an
+     * empty certificate_list. Keep this explicit so the managed PAL can
+     * decline authentication without manufacturing a private-key callback. */
+    if (certificate_list_len == 0u && !bytes && !signer) {
+        ctx->client_certificate_declined = 1;
+        ctx->client_certificate_sign = RIN_NULL;
+        ctx->client_certificate_sign_opaque = RIN_NULL;
+        return TLS_HS_ERR_OK;
+    }
+    if (!bytes || !signer || certificate_list_len < 3u)
+        return TLS_HS_ERR_CERTIFICATE;
 
     u32 list_len = read_u24(bytes);
     if (list_len != certificate_list_len - 3u || list_len == 0u)
@@ -1401,22 +1412,31 @@ int tls_recv_certificate_request(tls_handshake_ctx_t* ctx,
 int tls_send_client_certificate(tls_handshake_ctx_t* ctx)
 {
     if (!ctx || !ctx->client_certificate_requested ||
-        !ctx->client_certificate_list || !ctx->client_certificate_sign)
+        (!ctx->client_certificate_declined &&
+         (!ctx->client_certificate_list || !ctx->client_certificate_sign)) ||
+        (ctx->client_certificate_declined && ctx->client_certificate_list))
         return TLS_HS_ERR_CERTIFICATE;
 
     u8 msg[TLS_MAX_PENDING_HANDSHAKE_SEND];
     rin_size_t pos = 0u;
     rin_size_t context_len = ctx->is_tls13 ? 1u : 0u;
-    if (ctx->client_certificate_list_len > sizeof(msg) - 4u - context_len)
+    /* The TLS Certificate message always carries the 3-byte certificate_list
+     * vector, including when the vector is empty. */
+    rin_size_t list_len = ctx->client_certificate_declined
+        ? 3u : ctx->client_certificate_list_len;
+    if (list_len > sizeof(msg) - 4u - context_len)
         return TLS_HS_ERR_CERTIFICATE;
     msg[pos++] = TLS_HS_CERTIFICATE;
-    write_u24(msg + pos, ctx->client_certificate_list_len + context_len);
+    write_u24(msg + pos, list_len + context_len);
     pos += 3u;
     if (ctx->is_tls13)
         msg[pos++] = 0u; /* CertificateRequestContext */
-    rintls_memcpy(msg + pos, ctx->client_certificate_list,
-                  ctx->client_certificate_list_len);
-    pos += ctx->client_certificate_list_len;
+    if (ctx->client_certificate_declined) {
+        write_u24(msg + pos, 0u);
+    } else {
+        rintls_memcpy(msg + pos, ctx->client_certificate_list, list_len);
+    }
+    pos += list_len;
 
     if (ctx->pending_send_kind != TLS_PENDING_SEND_NONE) {
         return tls_handshake_flush_pending_send(
@@ -1425,7 +1445,9 @@ int tls_send_client_certificate(tls_handshake_ctx_t* ctx)
     int ret = tls_handshake_stage_pending_send(
         ctx, TLS_PENDING_SEND_CLIENT_CERTIFICATE, ctx->is_tls13,
         TLS_CONTENT_HANDSHAKE, ctx->version, msg, pos, 1,
-        TLS_STATE_CLIENT_CERTIFICATE_VERIFY);
+        ctx->client_certificate_declined
+            ? TLS_STATE_CERTIFICATE_RECEIVED
+            : TLS_STATE_CLIENT_CERTIFICATE_VERIFY);
     if (ret != TLS_HS_ERR_OK) return ret;
     ret = tls_handshake_flush_pending_send(ctx,
                                            TLS_PENDING_SEND_CLIENT_CERTIFICATE);
@@ -1436,7 +1458,7 @@ int tls_send_client_certificate(tls_handshake_ctx_t* ctx)
 int tls_send_client_certificate_verify(tls_handshake_ctx_t* ctx)
 {
     if (!ctx || !ctx->client_certificate_sent ||
-        !ctx->client_certificate_sign)
+        ctx->client_certificate_declined || !ctx->client_certificate_sign)
         return TLS_HS_ERR_CERTIFICATE;
     if (ctx->pending_send_kind != TLS_PENDING_SEND_NONE) {
         return tls_handshake_flush_pending_send(
@@ -1970,10 +1992,13 @@ int tls_handshake_client(tls_handshake_ctx_t* ctx)
         ret = tls_recv_certificate(ctx);
         if (ret != TLS_HS_ERR_OK) return ret;
         if (ctx->state == TLS_STATE_CLIENT_CERTIFICATE) {
+            int declined = ctx->client_certificate_declined;
             ret = tls_send_client_certificate(ctx);
             if (ret != TLS_HS_ERR_OK) return ret;
-            ret = tls_send_client_certificate_verify(ctx);
-            if (ret != TLS_HS_ERR_OK) return ret;
+            if (!declined) {
+                ret = tls_send_client_certificate_verify(ctx);
+                if (ret != TLS_HS_ERR_OK) return ret;
+            }
             ret = tls_recv_certificate(ctx);
             if (ret != TLS_HS_ERR_OK) return ret;
         }

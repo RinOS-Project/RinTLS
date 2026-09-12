@@ -216,6 +216,7 @@ typedef struct {
     tls_client_certificate_sign_func client_certificate_sign;
     void* client_certificate_sign_opaque;
     int client_certificate_requested;
+    int client_certificate_declined;
     int client_certificate_sent;
     u16 client_signature_scheme;
 

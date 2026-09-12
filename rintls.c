@@ -60,6 +60,7 @@ struct rintls_ctx {
     rintls_client_certificate_provider_func client_certificate_provider;
     void* client_certificate_provider_opaque;
     int client_certificate_provider_called;
+    int client_certificate_configured;
 };
 
 #define RINTLS_MAX_TRUST_ANCHORS 256u
@@ -267,7 +268,10 @@ int rintls_set_client_certificate(
     int result = tls_handshake_set_client_certificate(
         &ctx->handshake, certificate_list, certificate_list_len,
         (tls_client_certificate_sign_func)signer, signer_opaque);
-    if (result == TLS_HS_ERR_OK) return RINTLS_OK;
+    if (result == TLS_HS_ERR_OK) {
+        ctx->client_certificate_configured = 1;
+        return RINTLS_OK;
+    }
     if (result == TLS_HS_ERR_IO) return RINTLS_ERR_MEMORY;
     if (result == TLS_HS_ERR_UNEXPECTED) return RINTLS_ERR_HANDSHAKE;
     return RINTLS_ERR_CERTIFICATE;
@@ -294,6 +298,11 @@ int rintls_set_client_certificate_provider(
 int rintls_client_certificate_requested(const rintls_ctx* ctx)
 {
     return ctx ? tls_handshake_client_certificate_requested(&ctx->handshake) : 0;
+}
+
+int rintls_client_certificate_configured(const rintls_ctx* ctx)
+{
+    return ctx ? ctx->client_certificate_configured : 0;
 }
 
 static void rintls_free_anchor_list(rintls_trust_anchor* anchor)
@@ -516,9 +525,10 @@ int rintls_handshake(rintls_ctx* ctx)
 
     while (1) {
         int ret = rintls_handshake_step(ctx);
-        if (ret == RINTLS_ERR_WANT_READ &&
+        if ((ret == RINTLS_ERR_WANT_READ ||
+             ret == RINTLS_ERR_WANT_CREDENTIALS) &&
             ctx->handshake.client_certificate_requested &&
-            !ctx->handshake.client_certificate_list &&
+            !ctx->client_certificate_configured &&
             ctx->client_certificate_provider != RIN_NULL &&
             !ctx->client_certificate_provider_called) {
             ctx->client_certificate_provider_called = 1;
@@ -528,7 +538,7 @@ int rintls_handshake(rintls_ctx* ctx)
                 ctx->last_error = provider_result;
                 return provider_result;
             }
-            if (!ctx->handshake.client_certificate_list) {
+            if (!ctx->client_certificate_configured) {
                 ctx->last_error = RINTLS_ERR_CERTIFICATE;
                 return RINTLS_ERR_CERTIFICATE;
             }
@@ -892,6 +902,7 @@ const char* rintls_strerror(int error)
     case RINTLS_ERR_WANT_READ:  return "Need more readable socket data";
     case RINTLS_ERR_WANT_WRITE: return "Need writable socket";
     case RINTLS_ERR_TRUST:      return "No trusted certificate anchor";
+    case RINTLS_ERR_WANT_CREDENTIALS: return "Need client certificate credentials";
     default:                    return "Unknown error";
     }
 }
