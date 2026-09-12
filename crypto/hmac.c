@@ -186,6 +186,66 @@ void hmac_sha384(const u8* key, rin_size_t key_len,
 }
 
 /* ═══════════════════════════════════════
+ * HMAC-SHA512
+ * ═══════════════════════════════════════ */
+
+void hmac_sha512_init(hmac_sha512_ctx* ctx, const u8* key, rin_size_t key_len)
+{
+    u8 key_pad[SHA512_BLOCK_SIZE];
+    u8 ipad[SHA512_BLOCK_SIZE];
+    u8 opad[SHA512_BLOCK_SIZE];
+    rin_size_t i;
+
+    rintls_memset(key_pad, 0, SHA512_BLOCK_SIZE);
+    if (key_len > SHA512_BLOCK_SIZE) {
+        sha512(key, key_len, key_pad);
+    } else {
+        rintls_memcpy(key_pad, key, key_len);
+    }
+
+    rintls_memcpy(ctx->key_block, key_pad, SHA512_BLOCK_SIZE);
+    for (i = 0; i < SHA512_BLOCK_SIZE; i++) {
+        ipad[i] = key_pad[i] ^ 0x36;
+        opad[i] = key_pad[i] ^ 0x5c;
+    }
+
+    sha512_init(&ctx->inner);
+    sha512_update(&ctx->inner, ipad, SHA512_BLOCK_SIZE);
+    sha512_init(&ctx->outer);
+    sha512_update(&ctx->outer, opad, SHA512_BLOCK_SIZE);
+
+    rintls_secure_zero(key_pad, sizeof(key_pad));
+    rintls_secure_zero(ipad, sizeof(ipad));
+    rintls_secure_zero(opad, sizeof(opad));
+}
+
+void hmac_sha512_update(hmac_sha512_ctx* ctx, const u8* data, rin_size_t len)
+{
+    sha512_update(&ctx->inner, data, len);
+}
+
+void hmac_sha512_final(hmac_sha512_ctx* ctx, u8* mac)
+{
+    u8 inner_hash[SHA512_DIGEST_SIZE];
+
+    sha512_final(&ctx->inner, inner_hash);
+    sha512_update(&ctx->outer, inner_hash, SHA512_DIGEST_SIZE);
+    sha512_final(&ctx->outer, mac);
+    rintls_secure_zero(inner_hash, sizeof(inner_hash));
+}
+
+void hmac_sha512(const u8* key, rin_size_t key_len,
+                 const u8* data, rin_size_t data_len,
+                 u8* mac)
+{
+    hmac_sha512_ctx ctx;
+    hmac_sha512_init(&ctx, key, key_len);
+    hmac_sha512_update(&ctx, data, data_len);
+    hmac_sha512_final(&ctx, mac);
+    rintls_secure_zero(&ctx, sizeof(ctx));
+}
+
+/* ═══════════════════════════════════════
  * HKDF-SHA256 (RFC 5869)
  * ═══════════════════════════════════════ */
 

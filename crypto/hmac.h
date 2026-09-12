@@ -37,6 +37,20 @@ void hmac_sha384_update(hmac_sha384_ctx* ctx, const u8* data, rin_size_t len);
 void hmac_sha384_final(hmac_sha384_ctx* ctx, u8* mac);
 void hmac_sha384(const u8* key, rin_size_t key_len, const u8* data, rin_size_t data_len, u8* mac);
 
+/* HMAC-SHA512 */
+#define HMAC_SHA512_SIZE    64
+
+typedef struct {
+    sha512_ctx inner;
+    sha512_ctx outer;
+    u8 key_block[SHA512_BLOCK_SIZE];
+} hmac_sha512_ctx;
+
+void hmac_sha512_init(hmac_sha512_ctx* ctx, const u8* key, rin_size_t key_len);
+void hmac_sha512_update(hmac_sha512_ctx* ctx, const u8* data, rin_size_t len);
+void hmac_sha512_final(hmac_sha512_ctx* ctx, u8* mac);
+void hmac_sha512(const u8* key, rin_size_t key_len, const u8* data, rin_size_t data_len, u8* mac);
+
 /* ═══════════════════════════════════════
  * HKDF (HMAC-based Key Derivation Function)
  * RFC 5869
