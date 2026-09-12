@@ -274,6 +274,12 @@ int rintls_get_error(rintls_ctx* ctx);
 int rintls_get_peer_evidence(rintls_ctx* ctx,
                              rintls_peer_evidence* evidence);
 
+/* Copy the DER-encoded leaf certificate retained by a completed handshake.
+ * The required size is returned through length even when buffer is NULL or
+ * too small, so callers can perform a bounded two-pass copy. */
+int rintls_get_peer_certificate(rintls_ctx* ctx, void* buffer,
+                                rin_size_t capacity, rin_size_t* length);
+
 /*
  * エラーメッセージを取得
  */

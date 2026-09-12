@@ -838,6 +838,25 @@ int rintls_get_peer_evidence(rintls_ctx* ctx,
     return RINTLS_OK;
 }
 
+int rintls_get_peer_certificate(rintls_ctx* ctx, void* buffer,
+                                rin_size_t capacity, rin_size_t* length)
+{
+    rin_size_t required;
+
+    if (length) *length = 0u;
+    if (!ctx || !ctx->connected || !ctx->handshake.server_cert ||
+        ctx->handshake.server_cert_len == 0u || !length)
+        return RINTLS_ERR_CERTIFICATE;
+
+    required = ctx->handshake.server_cert_len;
+    *length = required;
+    if (!buffer || capacity < required)
+        return RINTLS_ERR_MEMORY;
+
+    rintls_memcpy(buffer, ctx->handshake.server_cert, required);
+    return RINTLS_OK;
+}
+
 const char* rintls_strerror(int error)
 {
     switch (error) {
