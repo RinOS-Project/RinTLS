@@ -806,6 +806,25 @@ u16 rintls_get_cipher_suite(rintls_ctx* ctx)
     return ctx->handshake.cipher_suite;
 }
 
+int rintls_get_application_protocol(const rintls_ctx* ctx, void* buffer,
+                                    rin_size_t capacity, rin_size_t* length)
+{
+    rin_size_t required;
+
+    if (length) *length = 0u;
+    if (!ctx || !ctx->connected || !length)
+        return RINTLS_ERR_HANDSHAKE;
+
+    required = ctx->handshake.negotiated_alpn_len;
+    *length = required;
+    if (!buffer || capacity < required)
+        return RINTLS_ERR_MEMORY;
+
+    if (required != 0u)
+        rintls_memcpy(buffer, ctx->handshake.negotiated_alpn, required);
+    return RINTLS_OK;
+}
+
 int rintls_get_error(rintls_ctx* ctx)
 {
     if (!ctx) return RINTLS_ERR_MEMORY;

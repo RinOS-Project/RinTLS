@@ -60,6 +60,40 @@ static u32 read_u24(const u8* p)
     return ((u32)p[0] << 16) | ((u32)p[1] << 8) | p[2];
 }
 
+/* The product ClientHello advertises only HTTP/1.1.  A server ALPN
+ * response is a single protocol name, so validate that response at the
+ * handshake boundary instead of allowing an unimplemented protocol to be
+ * reported as negotiated. */
+static int tls_parse_selected_alpn(tls_handshake_ctx_t* ctx,
+                                   const u8* extension, u16 extension_len)
+{
+    static const u8 http11[] = "http/1.1";
+    u16 protocol_list_len;
+    u8 protocol_len;
+
+    if (!ctx || !extension || extension_len < 3u ||
+        ctx->negotiated_alpn_len != 0u) {
+        return TLS_HS_ERR_UNEXPECTED;
+    }
+
+    protocol_list_len = read_u16(extension);
+    if ((u32)protocol_list_len + 2u != extension_len ||
+        protocol_list_len < 2u) {
+        return TLS_HS_ERR_UNEXPECTED;
+    }
+
+    protocol_len = extension[2];
+    if ((u16)protocol_len + 1u != protocol_list_len ||
+        protocol_len != sizeof(http11) - 1u ||
+        rintls_memcmp(extension + 3u, http11, protocol_len) != 0) {
+        return TLS_HS_ERR_UNEXPECTED;
+    }
+
+    rintls_memcpy(ctx->negotiated_alpn, extension + 3u, protocol_len);
+    ctx->negotiated_alpn_len = protocol_len;
+    return TLS_HS_ERR_OK;
+}
+
 static int tls_client_certificate_extensions_valid(const u8* bytes,
                                                    u16 size)
 {
@@ -912,6 +946,10 @@ int tls_recv_server_hello(tls_handshake_ctx_t* ctx)
                     rintls_memcpy(ctx->peer_public_key, p + 4, key_len);
                     ctx->peer_public_key_len = key_len;
                 }
+            } else if (ext_type == TLS_EXT_ALPN) {
+                int alpn_result = tls_parse_selected_alpn(ctx, p,
+                                                          ext_data_len);
+                if (alpn_result != TLS_HS_ERR_OK) return alpn_result;
             }
 
             p += ext_data_len;
@@ -1245,6 +1283,40 @@ int tls_recv_encrypted_extensions(tls_handshake_ctx_t* ctx)
 
     /* Transcriptに追加 */
     tls_transcript_update(ctx, msg, 4 + msg_len);
+
+    /* EncryptedExtensions carries the TLS 1.3 ALPN selection.  The
+     * extension block is length-delimited; reject truncation and malformed
+     * extension records before changing handshake state. */
+    {
+        const u8* p = msg + 4u;
+        const u8* end = p + msg_len;
+        u16 extensions_len;
+
+        if (p + 2u > end) return TLS_HS_ERR_UNEXPECTED;
+        extensions_len = read_u16(p);
+        p += 2u;
+        if ((u32)extensions_len != (u32)(end - p))
+            return TLS_HS_ERR_UNEXPECTED;
+
+        const u8* extensions_end = p + extensions_len;
+        while (p < extensions_end) {
+            u16 extension_type;
+            u16 extension_len;
+            if (extensions_end - p < 4u)
+                return TLS_HS_ERR_UNEXPECTED;
+            extension_type = read_u16(p);
+            extension_len = read_u16(p + 2u);
+            p += 4u;
+            if ((u32)extension_len > (u32)(extensions_end - p))
+                return TLS_HS_ERR_UNEXPECTED;
+            if (extension_type == TLS_EXT_ALPN) {
+                int alpn_result = tls_parse_selected_alpn(ctx, p,
+                                                          extension_len);
+                if (alpn_result != TLS_HS_ERR_OK) return alpn_result;
+            }
+            p += extension_len;
+        }
+    }
 
     ctx->state = TLS_STATE_ENCRYPTED_EXTENSIONS;
     return TLS_HS_ERR_OK;

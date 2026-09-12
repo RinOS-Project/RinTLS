@@ -128,6 +128,7 @@ typedef enum {
 
 #define TLS_MAX_PENDING_HANDSHAKE_SEND  16384
 #define TLS_MAX_PENDING_HANDSHAKE_RECV  16384
+#define TLS_MAX_NEGOTIATED_ALPN        32u
 #define TLS_MAX_CLIENT_CERTIFICATE_CHAIN (16u * 1024u)
 #define TLS_MAX_CLIENT_SIGNATURE_BYTES 512u
 #define TLS_MAX_CLIENT_CERTIFICATE_BYTES (16u * 1024u)
@@ -162,6 +163,8 @@ typedef struct {
     u16 version;
     u16 cipher_suite;
     u16 named_group;
+    u8 negotiated_alpn[TLS_MAX_NEGOTIATED_ALPN];
+    u8 negotiated_alpn_len;
 
     /* ランダム値 */
     u8 client_random[32];

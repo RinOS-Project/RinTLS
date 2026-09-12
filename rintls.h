@@ -264,6 +264,11 @@ u16 rintls_get_version(rintls_ctx* ctx);
  */
 u16 rintls_get_cipher_suite(rintls_ctx* ctx);
 
+/* Copy the selected ALPN protocol from a completed handshake.  The required
+ * size is returned through length even when buffer is NULL or too small. */
+int rintls_get_application_protocol(const rintls_ctx* ctx, void* buffer,
+                                    rin_size_t capacity, rin_size_t* length);
+
 /*
  * 最後のエラーを取得
  */
