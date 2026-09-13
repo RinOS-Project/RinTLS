@@ -1,6 +1,7 @@
 #include "../crypto/rsa_webcrypto.h"
 
 #include <assert.h>
+#include <bearssl.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -233,6 +234,8 @@ static void test_pss(void)
     u8 too_small[255];
     rin_size_t signature_length = 0;
     static const u8 message[] = "rintls pss message";
+    u8 digest[32];
+    br_sha256_context digest_context;
 
     test_random_mode = RANDOM_MODE_FIXED;
     assert(rintls_rsa_generate_keypair(2048u, 65537u, &key) == 0);
@@ -267,6 +270,26 @@ static void test_pss(void)
                                  message, sizeof(message) - 1u,
                                  RINTLS_RSA_PSS_SALT_LENGTH_MAX, signature,
                                  signature_length) == RINTLS_RSA_VERIFY_VALID);
+
+    br_sha256_init(&digest_context);
+    br_sha256_update(&digest_context, message, sizeof(message) - 1u);
+    br_sha256_out(&digest_context, digest);
+    rintls_secure_zero(&digest_context, sizeof(digest_context));
+    assert(rintls_rsa_pkcs1_sign_digest(
+               RINTLS_RSA_HASH_SHA256, &key, digest, sizeof(digest), signature,
+               sizeof(signature), &signature_length) == 0);
+    assert(rintls_rsa_pkcs1_verify_digest(
+               RINTLS_RSA_HASH_SHA256, &key.public_key, digest, sizeof(digest),
+               signature, signature_length) == RINTLS_RSA_VERIFY_VALID);
+    assert(rintls_rsa_pss_sign_digest(
+               RINTLS_RSA_HASH_SHA256, &key, digest, sizeof(digest), 32u,
+               signature, sizeof(signature), &signature_length) == 0);
+    assert(rintls_rsa_pss_verify_digest(
+               RINTLS_RSA_HASH_SHA256, &key.public_key, digest, sizeof(digest),
+               32u, signature, signature_length) == RINTLS_RSA_VERIFY_VALID);
+    assert(rintls_rsa_pss_verify_digest(
+               RINTLS_RSA_HASH_SHA256, &key.public_key, digest, sizeof(digest) - 1u,
+               32u, signature, signature_length) == RINTLS_RSA_VERIFY_INVALID);
 
     memset(too_small, 0xa5, sizeof(too_small));
     signature_length = 1;

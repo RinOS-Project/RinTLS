@@ -102,6 +102,18 @@ int rintls_rsa_pkcs1_verify(u32 hash_algorithm,
                             const rintls_rsa_public_key* public_key,
                             const u8* message, rin_size_t message_len,
                             const u8* signature, rin_size_t signature_len);
+/* Hash-oriented counterparts for callers such as System.Security.Cryptography
+ * whose SignHash/VerifyHash APIs receive the digest rather than the original
+ * message. The digest is never hashed a second time. */
+int rintls_rsa_pkcs1_sign_digest(u32 hash_algorithm,
+                                 const rintls_rsa_private_key* private_key,
+                                 const u8* digest, rin_size_t digest_len,
+                                 u8* signature, rin_size_t signature_capacity,
+                                 rin_size_t* signature_len);
+int rintls_rsa_pkcs1_verify_digest(u32 hash_algorithm,
+                                   const rintls_rsa_public_key* public_key,
+                                   const u8* digest, rin_size_t digest_len,
+                                   const u8* signature, rin_size_t signature_len);
 int rintls_rsa_pss_sign(u32 hash_algorithm,
                         const rintls_rsa_private_key* private_key,
                         const u8* message, rin_size_t message_len,
@@ -113,6 +125,17 @@ int rintls_rsa_pss_verify(u32 hash_algorithm,
                           const u8* message, rin_size_t message_len,
                           u32 salt_length, const u8* signature,
                           rin_size_t signature_len);
+int rintls_rsa_pss_sign_digest(u32 hash_algorithm,
+                               const rintls_rsa_private_key* private_key,
+                               const u8* digest, rin_size_t digest_len,
+                               u32 salt_length, u8* signature,
+                               rin_size_t signature_capacity,
+                               rin_size_t* signature_len);
+int rintls_rsa_pss_verify_digest(u32 hash_algorithm,
+                                 const rintls_rsa_public_key* public_key,
+                                 const u8* digest, rin_size_t digest_len,
+                                 u32 salt_length, const u8* signature,
+                                 rin_size_t signature_len);
 
 #ifdef __cplusplus
 }

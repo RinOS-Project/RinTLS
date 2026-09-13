@@ -340,6 +340,67 @@ static int rintls_rsa_hash_message(u32 hash_algorithm, const u8* message,
     }
 }
 
+static int rintls_rsa_digest_info(u32 hash_algorithm, const u8* digest,
+                                  rin_size_t digest_len, u8* output,
+                                  rin_size_t output_capacity,
+                                  rin_size_t* output_len)
+{
+    static const u8 sha1_prefix[] = {
+        0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e,
+        0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14
+    };
+    static const u8 sha256_prefix[] = {
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86,
+        0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05,
+        0x00, 0x04, 0x20
+    };
+    static const u8 sha384_prefix[] = {
+        0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86,
+        0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02, 0x05,
+        0x00, 0x04, 0x30
+    };
+    static const u8 sha512_prefix[] = {
+        0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86,
+        0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05,
+        0x00, 0x04, 0x40
+    };
+    const u8* prefix = NULL;
+    rin_size_t prefix_len = 0u;
+    rin_size_t expected_digest_len = 0u;
+
+    switch (hash_algorithm) {
+    case RINTLS_RSA_HASH_SHA1:
+        prefix = sha1_prefix;
+        prefix_len = sizeof(sha1_prefix);
+        expected_digest_len = 20u;
+        break;
+    case RINTLS_RSA_HASH_SHA256:
+        prefix = sha256_prefix;
+        prefix_len = sizeof(sha256_prefix);
+        expected_digest_len = 32u;
+        break;
+    case RINTLS_RSA_HASH_SHA384:
+        prefix = sha384_prefix;
+        prefix_len = sizeof(sha384_prefix);
+        expected_digest_len = 48u;
+        break;
+    case RINTLS_RSA_HASH_SHA512:
+        prefix = sha512_prefix;
+        prefix_len = sizeof(sha512_prefix);
+        expected_digest_len = 64u;
+        break;
+    default:
+        return -1;
+    }
+    if (!digest || digest_len != expected_digest_len || !output ||
+        output_capacity < prefix_len + digest_len || !output_len)
+        return -1;
+    rintls_memcpy(output, prefix, prefix_len);
+    rintls_memcpy(output + prefix_len, digest, digest_len);
+    *output_len = prefix_len + digest_len;
+    return 0;
+}
+
 int rintls_rsa_generate_keypair(u32 modulus_bits, u32 public_exponent,
                                 rintls_rsa_private_key* key_out)
 {
@@ -836,6 +897,87 @@ done:
     return result;
 }
 
+int rintls_rsa_pkcs1_sign_digest(u32 hash_algorithm,
+                                 const rintls_rsa_private_key* private_key,
+                                 const u8* digest, rin_size_t digest_len,
+                                 u8* signature, rin_size_t signature_capacity,
+                                 rin_size_t* signature_len)
+{
+    u8 digest_info[128];
+    u8 representative[RINTLS_RSA_MAX_MODULUS_BYTES];
+    u8 encoded[RINTLS_RSA_MAX_MODULUS_BYTES];
+    rin_size_t digest_info_len = 0u;
+    rin_size_t encoded_len = 0u;
+    rin_size_t produced_len = 0u;
+    int result = -1;
+
+    rintls_secure_zero(digest_info, sizeof(digest_info));
+    rintls_secure_zero(representative, sizeof(representative));
+    rintls_secure_zero(encoded, sizeof(encoded));
+    if (!signature_len ||
+        !rintls_rsa_result_is_disjoint(
+            signature, signature_capacity, signature_len, private_key,
+            sizeof(*private_key), digest, digest_len, NULL, 0u) ||
+        !rintls_rsa_output_is_valid(signature, signature_capacity))
+        goto done;
+    *signature_len = 0u;
+    rintls_rsa_clear_output(signature, signature_capacity);
+    if (rintls_rsa_digest_info(hash_algorithm, digest, digest_len,
+                               digest_info, sizeof(digest_info),
+                               &digest_info_len) != 0 ||
+        !private_key ||
+        rintls_rsa_emsa_pkcs1_encode(
+            digest_info, digest_info_len, private_key->public_key.modulus_len,
+            representative, sizeof(representative), &encoded_len) != 0 ||
+        rintls_rsa_raw_private(private_key, representative, encoded_len,
+                               encoded, sizeof(encoded), &produced_len) != 0 ||
+        produced_len != private_key->public_key.modulus_len ||
+        signature_capacity < produced_len)
+        goto done;
+    rintls_memcpy(signature, encoded, produced_len);
+    *signature_len = produced_len;
+    result = 0;
+
+done:
+    if (result != 0 && signature && signature_capacity <= RINTLS_RSA_MAX_MODULUS_BYTES)
+        rintls_rsa_clear_output(signature, signature_capacity);
+    rintls_secure_zero(encoded, sizeof(encoded));
+    rintls_secure_zero(representative, sizeof(representative));
+    rintls_secure_zero(digest_info, sizeof(digest_info));
+    return result;
+}
+
+int rintls_rsa_pkcs1_verify_digest(u32 hash_algorithm,
+                                   const rintls_rsa_public_key* public_key,
+                                   const u8* digest, rin_size_t digest_len,
+                                   const u8* signature, rin_size_t signature_len)
+{
+    u8 digest_info[128];
+    u8 encoded[RINTLS_RSA_MAX_MODULUS_BYTES];
+    rin_size_t digest_info_len = 0u;
+    rin_size_t encoded_len = 0u;
+    int result = RINTLS_RSA_VERIFY_INVALID;
+
+    rintls_secure_zero(digest_info, sizeof(digest_info));
+    rintls_secure_zero(encoded, sizeof(encoded));
+    if (rintls_rsa_digest_info(hash_algorithm, digest, digest_len,
+                               digest_info, sizeof(digest_info),
+                               &digest_info_len) != 0 || !public_key ||
+        !signature || signature_len != public_key->modulus_len ||
+        rintls_rsa_raw_public(public_key, signature, signature_len, encoded,
+                              sizeof(encoded), &encoded_len) != 0 ||
+        encoded_len != public_key->modulus_len)
+        goto done;
+    result = rintls_rsa_emsa_pkcs1_verify(
+        digest_info, digest_info_len, public_key->modulus_len, encoded,
+        encoded_len);
+
+done:
+    rintls_secure_zero(encoded, sizeof(encoded));
+    rintls_secure_zero(digest_info, sizeof(digest_info));
+    return result;
+}
+
 static int rintls_rsa_pss_salt_length(const rintls_rsa_public_key* public_key,
                                       rin_size_t digest_len, u32 requested,
                                       rin_size_t* salt_len_out)
@@ -856,33 +998,32 @@ static int rintls_rsa_pss_salt_length(const rintls_rsa_public_key* public_key,
     return 0;
 }
 
-static int rintls_rsa_pss_encode(u32 hash_algorithm,
-                                 const br_hash_class* digest_class,
-                                 const u8* message, rin_size_t message_len,
-                                 const rintls_rsa_public_key* public_key,
-                                 rin_size_t salt_len,
-                                 u8 encoded[RINTLS_RSA_MAX_MODULUS_BYTES])
+static int rintls_rsa_pss_encode_digest(
+    u32 hash_algorithm, const br_hash_class* digest_class, const u8* digest,
+    rin_size_t digest_len, const rintls_rsa_public_key* public_key,
+    rin_size_t salt_len, u8 encoded[RINTLS_RSA_MAX_MODULUS_BYTES])
 {
-    u8 digest[64];
     u8 hash[64];
     u8 salt[RINTLS_RSA_MAX_MODULUS_BYTES];
     u8 hash_input[8u + 64u + RINTLS_RSA_MAX_MODULUS_BYTES];
-    rin_size_t digest_len;
     rin_size_t encoded_len;
     rin_size_t database_len;
     rin_size_t delimiter;
+    rin_size_t expected_digest_len;
     u32 unused_bits;
+    const br_hash_class* ignored_digest_class;
+    const unsigned char* ignored_oid;
     int result = -1;
 
-    rintls_secure_zero(digest, sizeof(digest));
     rintls_secure_zero(hash, sizeof(hash));
     rintls_secure_zero(salt, sizeof(salt));
     rintls_secure_zero(hash_input, sizeof(hash_input));
-    if (!digest_class || !public_key || !encoded ||
-        rintls_rsa_hash_message(hash_algorithm, message, message_len, digest,
-                                &digest_len) != 0 ||
-        rintls_rsa_pss_salt_length(public_key, digest_len, (u32)salt_len,
-                                    &salt_len) != 0)
+    if (!digest_class || !digest || !public_key || !encoded ||
+        rintls_rsa_hash_parameters(hash_algorithm, &ignored_digest_class,
+                                    &ignored_oid, &expected_digest_len) != 0 ||
+        digest_len != expected_digest_len ||
+        public_key->modulus_len < digest_len + 2u ||
+        salt_len > public_key->modulus_len - digest_len - 2u)
         goto done;
 
     encoded_len = public_key->modulus_len;
@@ -914,22 +1055,19 @@ done:
     rintls_secure_zero(hash_input, sizeof(hash_input));
     rintls_secure_zero(salt, sizeof(salt));
     rintls_secure_zero(hash, sizeof(hash));
-    rintls_secure_zero(digest, sizeof(digest));
     return result;
 }
 
-int rintls_rsa_pss_sign(u32 hash_algorithm,
-                        const rintls_rsa_private_key* private_key,
-                        const u8* message, rin_size_t message_len,
-                        u32 salt_length, u8* signature,
-                        rin_size_t signature_capacity,
-                        rin_size_t* signature_len)
+static int rintls_rsa_pss_sign_digest_core(
+    u32 hash_algorithm, const rintls_rsa_private_key* private_key,
+    const u8* digest, rin_size_t digest_len, u32 salt_length, u8* signature,
+    rin_size_t signature_capacity, rin_size_t* signature_len)
 {
     rintls_bearssl_private_key bearssl_private_key;
     rintls_bearssl_public_key bearssl_public_key;
     const br_hash_class* digest_class;
     const unsigned char* oid;
-    rin_size_t digest_len;
+    rin_size_t expected_digest_len;
     rin_size_t effective_salt_len;
     int result_buffers_writable = 0;
     int result = -1;
@@ -940,7 +1078,7 @@ int rintls_rsa_pss_sign(u32 hash_algorithm,
         goto done;
     if (!rintls_rsa_result_is_disjoint(
             signature, signature_capacity, signature_len, private_key,
-            sizeof(*private_key), message, message_len, NULL, 0u))
+            sizeof(*private_key), digest, digest_len, NULL, 0u))
         goto done;
     result_buffers_writable = 1;
     *signature_len = 0;
@@ -948,7 +1086,8 @@ int rintls_rsa_pss_sign(u32 hash_algorithm,
         goto done;
     rintls_rsa_clear_output(signature, signature_capacity);
     if (rintls_rsa_hash_parameters(hash_algorithm, &digest_class, &oid,
-                                   &digest_len) != 0 ||
+                                   &expected_digest_len) != 0 ||
+        digest_len != expected_digest_len ||
         rintls_rsa_private_key_to_bearssl(private_key,
                                            &bearssl_private_key) != 0 ||
         rintls_rsa_private_key_is_consistent(private_key,
@@ -958,13 +1097,13 @@ int rintls_rsa_pss_sign(u32 hash_algorithm,
         signature_capacity < private_key->public_key.modulus_len ||
         rintls_rsa_pss_salt_length(&private_key->public_key, digest_len,
                                    salt_length, &effective_salt_len) != 0 ||
-        rintls_rsa_pss_encode(hash_algorithm, digest_class, message,
-                              message_len, &private_key->public_key,
-                              effective_salt_len, signature) != 0 ||
+        rintls_rsa_pss_encode_digest(
+            hash_algorithm, digest_class, digest, digest_len,
+            &private_key->public_key, effective_salt_len, signature) != 0 ||
         br_rsa_i31_private(signature, &bearssl_private_key.key) == 0 ||
-        rintls_rsa_pss_verify(hash_algorithm, &private_key->public_key,
-                              message, message_len, salt_length, signature,
-                              private_key->public_key.modulus_len) !=
+        rintls_rsa_pss_verify_digest(
+            hash_algorithm, &private_key->public_key, digest, digest_len,
+            salt_length, signature, private_key->public_key.modulus_len) !=
             RINTLS_RSA_VERIFY_VALID)
         goto done;
     (void)oid;
@@ -981,20 +1120,63 @@ done:
     return result;
 }
 
-int rintls_rsa_pss_verify(u32 hash_algorithm,
-                          const rintls_rsa_public_key* public_key,
-                          const u8* message, rin_size_t message_len,
-                          u32 salt_length, const u8* signature,
-                          rin_size_t signature_len)
+int rintls_rsa_pss_sign(u32 hash_algorithm,
+                        const rintls_rsa_private_key* private_key,
+                        const u8* message, rin_size_t message_len,
+                        u32 salt_length, u8* signature,
+                        rin_size_t signature_capacity,
+                        rin_size_t* signature_len)
+{
+    u8 digest[64];
+    rin_size_t digest_len = 0u;
+    int result;
+
+    rintls_secure_zero(digest, sizeof(digest));
+    if (!signature_len ||
+        !rintls_rsa_result_is_disjoint(
+            signature, signature_capacity, signature_len, private_key,
+            sizeof(*private_key), message, message_len, NULL, 0u))
+        return -1;
+    if (rintls_rsa_hash_message(hash_algorithm, message, message_len, digest,
+                                &digest_len) != 0) {
+        if (signature_len)
+            *signature_len = 0u;
+        if (signature && signature_capacity <= RINTLS_RSA_MAX_MODULUS_BYTES)
+            rintls_rsa_clear_output(signature, signature_capacity);
+        rintls_secure_zero(digest, sizeof(digest));
+        return -1;
+    }
+    result = rintls_rsa_pss_sign_digest_core(
+        hash_algorithm, private_key, digest, digest_len, salt_length, signature,
+        signature_capacity, signature_len);
+    rintls_secure_zero(digest, sizeof(digest));
+    return result;
+}
+
+int rintls_rsa_pss_sign_digest(u32 hash_algorithm,
+                               const rintls_rsa_private_key* private_key,
+                               const u8* digest, rin_size_t digest_len,
+                               u32 salt_length, u8* signature,
+                               rin_size_t signature_capacity,
+                               rin_size_t* signature_len)
+{
+    return rintls_rsa_pss_sign_digest_core(
+        hash_algorithm, private_key, digest, digest_len, salt_length, signature,
+        signature_capacity, signature_len);
+}
+
+static int rintls_rsa_pss_verify_digest_core(
+    u32 hash_algorithm, const rintls_rsa_public_key* public_key,
+    const u8* digest, rin_size_t digest_len, u32 salt_length,
+    const u8* signature, rin_size_t signature_len)
 {
     rintls_bearssl_public_key bearssl_public_key;
     const br_hash_class* digest_class;
     const unsigned char* oid;
     u8 encoded[RINTLS_RSA_MAX_MODULUS_BYTES];
-    u8 digest[64];
     u8 computed_hash[64];
     u8 hash_input[8u + 64u + RINTLS_RSA_MAX_MODULUS_BYTES];
-    rin_size_t digest_len;
+    rin_size_t expected_digest_len;
     rin_size_t effective_salt_len;
     rin_size_t encoded_len;
     rin_size_t database_len;
@@ -1005,13 +1187,11 @@ int rintls_rsa_pss_verify(u32 hash_algorithm,
 
     rintls_secure_zero(&bearssl_public_key, sizeof(bearssl_public_key));
     rintls_secure_zero(encoded, sizeof(encoded));
-    rintls_secure_zero(digest, sizeof(digest));
     rintls_secure_zero(computed_hash, sizeof(computed_hash));
     rintls_secure_zero(hash_input, sizeof(hash_input));
     if (rintls_rsa_hash_parameters(hash_algorithm, &digest_class, &oid,
-                                   &digest_len) != 0 ||
-        rintls_rsa_hash_message(hash_algorithm, message, message_len, digest,
-                                &digest_len) != 0 ||
+                                   &expected_digest_len) != 0 ||
+        !digest || digest_len != expected_digest_len || !public_key ||
         rintls_rsa_public_key_to_bearssl(public_key, &bearssl_public_key) != 0 ||
         rintls_rsa_pss_salt_length(public_key, digest_len, salt_length,
                                    &effective_salt_len) != 0 ||
@@ -1076,8 +1256,42 @@ int rintls_rsa_pss_verify(u32 hash_algorithm,
 done:
     rintls_secure_zero(hash_input, sizeof(hash_input));
     rintls_secure_zero(computed_hash, sizeof(computed_hash));
-    rintls_secure_zero(digest, sizeof(digest));
     rintls_secure_zero(encoded, sizeof(encoded));
     rintls_secure_zero(&bearssl_public_key, sizeof(bearssl_public_key));
     return result;
+}
+
+int rintls_rsa_pss_verify(u32 hash_algorithm,
+                          const rintls_rsa_public_key* public_key,
+                          const u8* message, rin_size_t message_len,
+                          u32 salt_length, const u8* signature,
+                          rin_size_t signature_len)
+{
+    u8 digest[64];
+    rin_size_t digest_len = 0u;
+    int result;
+
+    rintls_secure_zero(digest, sizeof(digest));
+    if (rintls_rsa_hash_message(hash_algorithm, message, message_len, digest,
+                                &digest_len) != 0) {
+        rintls_secure_zero(digest, sizeof(digest));
+        return RINTLS_RSA_VERIFY_INVALID;
+    }
+    result = rintls_rsa_pss_verify_digest_core(
+        hash_algorithm, public_key, digest, digest_len, salt_length, signature,
+        signature_len);
+    rintls_secure_zero(digest, sizeof(digest));
+    return result;
+}
+
+int rintls_rsa_pss_verify_digest(u32 hash_algorithm,
+                                 const rintls_rsa_public_key* public_key,
+                                 const u8* digest, rin_size_t digest_len,
+                                 u32 salt_length, const u8* signature,
+                                 rin_size_t signature_len)
+{
+    int result = rintls_rsa_pss_verify_digest_core(
+        hash_algorithm, public_key, digest, digest_len, salt_length, signature,
+        signature_len);
+    return result < 0 ? RINTLS_RSA_VERIFY_INVALID : result;
 }
