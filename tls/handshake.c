@@ -1313,7 +1313,7 @@ int tls_recv_encrypted_extensions(tls_handshake_ctx_t* ctx)
         while (p < extensions_end) {
             u16 extension_type;
             u16 extension_len;
-            if (extensions_end - p < 4u)
+            if ((u32)(extensions_end - p) < 4u)
                 return TLS_HS_ERR_UNEXPECTED;
             extension_type = read_u16(p);
             extension_len = read_u16(p + 2u);
