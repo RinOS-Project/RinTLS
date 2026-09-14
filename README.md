@@ -1,6 +1,14 @@
 # RinTLS
 RinOS用TLSライブラリ
 
+## Argon2id KDF boundary
+
+`crypto/argon2.h` exposes the versioned Argon2id v1.3 request contract used by
+RinOS consumers. `crypto/argon2.c` is the only RinTLS source that includes the
+version-pinned external Argon2 provider header; it preserves caller-owned
+allocation callbacks and clears the caller's output before returning a
+provider error. Consumers must not include the provider header directly.
+
 ## Modern WebCrypto provider boundary
 
 RinOS builds the modern public-key boundary from `crypto/modern.c` and
