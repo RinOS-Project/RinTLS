@@ -181,8 +181,10 @@ int rintls_set_hostname(rintls_ctx* ctx, const char* hostname)
     rin_size_t label_start = 0;
     if (!ctx || !hostname) return RINTLS_ERR_MEMORY;
     if (ctx->handshake_started) return RINTLS_ERR_HANDSHAKE;
-    while (hostname[len] != '\0' && len < 254u) ++len;
-    if (len == 0u || len > 253u || hostname[len] != '\0')
+    while (len < RINTLS_MAX_HOSTNAME_BYTES && hostname[len] != '\0')
+        ++len;
+    if (len == 0u || len >= RINTLS_MAX_HOSTNAME_BYTES ||
+        hostname[len] != '\0')
         return RINTLS_ERR_HOSTNAME;
     for (rin_size_t index = 0u; index <= len; ++index) {
         char value = hostname[index];

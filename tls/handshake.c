@@ -314,7 +314,7 @@ void tls_handshake_clear(tls_handshake_ctx_t* ctx)
 void tls_handshake_set_server_name(tls_handshake_ctx_t* ctx, const char* name)
 {
     rin_size_t len = 0;
-    while (name[len] && len < sizeof(ctx->server_name) - 1) {
+    while (len < sizeof(ctx->server_name) - 1u && name[len]) {
         ctx->server_name[len] = name[len];
         len++;
     }

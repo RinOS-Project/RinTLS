@@ -783,8 +783,11 @@ static int x509_dns_name_matches(const u8* pattern, rin_size_t pattern_len,
     rin_size_t host_offset = 0;
 
     if (!pattern || !hostname || pattern_len == 0) return 0;
-    while (hostname[host_len]) host_len++;
-    if (host_len == 0) return 0;
+    while (host_len < X509_MAX_HOSTNAME_BYTES && hostname[host_len])
+        host_len++;
+    if (host_len == 0 || host_len >= X509_MAX_HOSTNAME_BYTES ||
+        hostname[host_len] != '\0')
+        return 0;
 
     /* RFC 6125 wildcard form: a complete left-most label only. It must match
      * exactly one non-empty hostname label, never the bare suffix or multiple

@@ -47,6 +47,11 @@ extern "C" {
 #define RINTLS_PEER_EVIDENCE_TRUSTED_TIME 0x00000004u
 #define RINTLS_PEER_EVIDENCE_REQUIRED 0x00000007u
 
+/* Maximum DNS hostname text length is 253 bytes.  The public C-string
+ * boundary scans at most 254 bytes so a 253-byte hostname may still carry
+ * its terminating NUL; longer or unterminated input is rejected. */
+#define RINTLS_MAX_HOSTNAME_BYTES 254u
+
 typedef struct rintls_peer_evidence {
     u32 struct_size;
     u32 version;
