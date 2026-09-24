@@ -51,3 +51,19 @@ overlap is rejected without modifying caller storage. The bounded BearSSL i31
 RSA key-generation archive path is covered by `rintls-rsa-webcrypto`; Browser
 process/QEMU WebCrypto coverage remains unfinished, so see the root `TODO.md`
 for the still-unchecked P1.4 evidence.
+
+## Public API contract
+
+| Requirement | Contract |
+| --- | --- |
+| Purpose | RinTLS provides cryptographic and TLS-related interfaces for RinOS, with public declarations grouped under `crypto/`, `tls/`, and `x509/` and the umbrella header `rintls.h`. |
+| Supported API | Public interfaces include `rintls.h`, cryptographic provider declarations, `tls/handshake.h`, `tls/record.h`, and `x509/cert.h`. Supported algorithms and protocol profiles are limited to those explicitly implemented and documented by the selected provider/build. |
+| Unsupported API | Do not assume general TLS interoperability, complete X.509 validation, every cipher suite, or every algorithm from the presence of a header. Unsupported profiles and provider operations fail closed. |
+| ownership | Follow each header's buffer, context, and provider ownership rules. Contexts and returned buffers must be released through their documented API; borrowed views remain valid only for their specified lifetime. |
+| thread-safety | Thread-safety depends on the operation and provider. Do not share mutable handshake, record, or crypto contexts concurrently unless the declaration explicitly permits it. |
+| limits | Protocol and input bounds are defined by the implementation and provider profile; callers must respect declared lengths and reject oversized inputs. No unbounded-input guarantee is provided. |
+| errors | Malformed input, unsupported algorithms/profiles, missing provider operations, or cryptographic failures are returned through status/result codes. Callers must treat failure as fatal to that operation and never consume partial security state. |
+| ABI stability | The public C headers are the C ABI surface. No cross-version ABI stability promise is published; provider and consumer should be built against matching headers and implementation. |
+| security | Use only supported provider configurations and authenticated protocol flows. Do not replace certificate/peer policy with successful parsing or handshake progress; applications must verify identity and policy before trusting data. |
+| build | There is no standalone top-level build contract. Build through the consuming RinOS/Ladybird configuration that supplies the required provider and feature profile. |
+| test | A `tests` directory is present and consuming build configurations expose validation targets. This README does not claim every target is available as a standalone test command. |
