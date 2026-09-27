@@ -1025,7 +1025,8 @@ int rintls_verify_peer_crl(rintls_ctx* ctx, const void* crl,
 
     if (evidence != RIN_NULL)
         rintls_memset(evidence, 0, sizeof(*evidence));
-    if (!ctx || !crl || crl_len == 0u || sequence == 0u || !evidence ||
+    if (!ctx || !crl || crl_len == 0u || crl_len > RINTLS_MAX_CRL_SIZE ||
+        sequence == 0u || !evidence ||
         !ctx->connected || !ctx->peer_verified ||
         !ctx->handshake.server_cert || ctx->handshake.server_cert_len == 0u ||
         !ctx->handshake.server_issuer_cert ||

@@ -816,7 +816,8 @@ int x509_verify_crl(const u8* der, rin_size_t len,
 
     if (result != NULL) rintls_memset(result, 0, sizeof(*result));
     rintls_memset(&parsed, 0, sizeof(parsed));
-    if (!der || len == 0u || !certificate || !issuer || !result ||
+    if (!der || len == 0u || len > X509_MAX_CRL_SIZE ||
+        !certificate || !issuer || !result ||
         !issuer->subject_name || issuer->subject_name_len == 0u ||
         !issuer->is_ca || (issuer->has_key_usage && !issuer->can_sign_crl)) {
         return X509_ERR_REVOCATION;

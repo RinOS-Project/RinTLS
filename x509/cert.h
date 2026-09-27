@@ -18,6 +18,7 @@
 #define X509_MAX_CN_SIZE        256
 #define X509_MAX_SAN_SIZE       256
 #define X509_MAX_REVOCATION_URL_SIZE 256
+#define X509_MAX_CRL_SIZE        (256u * 1024u)
 #define X509_MAX_CHAIN_DEPTH    10
 /* Maximum hostname scan window including the NUL terminator. */
 #define X509_MAX_HOSTNAME_BYTES 254u
