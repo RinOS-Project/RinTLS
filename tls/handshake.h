@@ -136,6 +136,7 @@ typedef enum {
 #define TLS_MAX_CLIENT_SIGNATURE_ALGORITHMS_BYTES \
     (2u + TLS_MAX_CLIENT_SIGNATURE_SCHEMES * 2u)
 #define TLS_MAX_CLIENT_CERTIFICATE_AUTHORITIES_BYTES 4098u
+#define TLS_MAX_CLIENT_CIPHER_SUITES 8u
 
 typedef int (*tls_trust_anchor_verify_func)(void* opaque,
                                             const x509_cert_t* chain_top);
@@ -166,6 +167,8 @@ typedef struct {
     /* ネゴシエートされた値 */
     u16 version;
     u16 cipher_suite;
+    u16 client_cipher_suites[TLS_MAX_CLIENT_CIPHER_SUITES];
+    u16 client_cipher_suite_count;
     u16 named_group;
     u8 negotiated_alpn[TLS_MAX_NEGOTIATED_ALPN];
     u8 negotiated_alpn_len;
@@ -274,6 +277,10 @@ void tls_handshake_clear(tls_handshake_ctx_t* ctx);
 
 /* サーバー名を設定 (SNI) */
 void tls_handshake_set_server_name(tls_handshake_ctx_t* ctx, const char* name);
+
+int tls_handshake_set_client_cipher_suites(tls_handshake_ctx_t* ctx,
+                                           const u16* cipher_suites,
+                                           rin_size_t cipher_suite_count);
 
 void tls_handshake_set_trust_anchor_verifier(tls_handshake_ctx_t* ctx,
                                              tls_trust_anchor_verify_func verify,

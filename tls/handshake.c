@@ -321,6 +321,45 @@ void tls_handshake_set_server_name(tls_handshake_ctx_t* ctx, const char* name)
     ctx->server_name[len] = '\0';
 }
 
+static int tls_client_cipher_suite_supported(u16 cipher_suite)
+{
+    switch (cipher_suite) {
+    case TLS13_AES_128_GCM_SHA256:
+    case TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:
+    case TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+int tls_handshake_set_client_cipher_suites(tls_handshake_ctx_t* ctx,
+                                           const u16* cipher_suites,
+                                           rin_size_t cipher_suite_count)
+{
+    if (!ctx || !cipher_suites || cipher_suite_count == 0u ||
+        cipher_suite_count > TLS_MAX_CLIENT_CIPHER_SUITES ||
+        ctx->state != TLS_STATE_INIT) {
+        return TLS_HS_ERR_CIPHER;
+    }
+
+    for (rin_size_t index = 0u; index < cipher_suite_count; ++index) {
+        if (!tls_client_cipher_suite_supported(cipher_suites[index]))
+            return TLS_HS_ERR_CIPHER;
+        for (rin_size_t previous = 0u; previous < index; ++previous) {
+            if (cipher_suites[previous] == cipher_suites[index])
+                return TLS_HS_ERR_CIPHER;
+        }
+    }
+
+    rintls_memset(ctx->client_cipher_suites, 0,
+                  sizeof(ctx->client_cipher_suites));
+    rintls_memcpy(ctx->client_cipher_suites, cipher_suites,
+                  cipher_suite_count * sizeof(cipher_suites[0]));
+    ctx->client_cipher_suite_count = (u16)cipher_suite_count;
+    return TLS_HS_ERR_OK;
+}
+
 void tls_handshake_set_trust_anchor_verifier(tls_handshake_ctx_t* ctx,
                                              tls_trust_anchor_verify_func verify,
                                              void* opaque)
@@ -694,15 +733,26 @@ int tls_send_client_hello(tls_handshake_ctx_t* ctx)
     /* セッションID (空) */
     msg[pos++] = 0;
 
-    /* 暗号スイート */
-    write_u16(msg + pos, 6);  /* 長さ: 3スイート * 2バイト */
+    /* 暗号スイート。未指定時はproductの既定順序を維持し、managed
+     * CipherSuitesPolicy指定時だけ、検証済みallow-listをそのまま広告する。 */
+    static const u16 default_cipher_suites[] = {
+        TLS13_AES_128_GCM_SHA256,
+        TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+    };
+    const u16* cipher_suites = default_cipher_suites;
+    rin_size_t cipher_suite_count = sizeof(default_cipher_suites) /
+                                    sizeof(default_cipher_suites[0]);
+    if (ctx->client_cipher_suite_count != 0u) {
+        cipher_suites = ctx->client_cipher_suites;
+        cipher_suite_count = ctx->client_cipher_suite_count;
+    }
+    write_u16(msg + pos, (u16)(cipher_suite_count * 2u));
     pos += 2;
-    write_u16(msg + pos, TLS13_AES_128_GCM_SHA256);
-    pos += 2;
-    write_u16(msg + pos, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256);
-    pos += 2;
-    write_u16(msg + pos, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256);
-    pos += 2;
+    for (rin_size_t index = 0u; index < cipher_suite_count; ++index) {
+        write_u16(msg + pos, cipher_suites[index]);
+        pos += 2;
+    }
 
     /* 圧縮メソッド (nullのみ) */
     msg[pos++] = 1;  /* 長さ */

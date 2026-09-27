@@ -244,6 +244,19 @@ int rintls_set_options(rintls_ctx* ctx, u32 options)
     return RINTLS_OK;
 }
 
+int rintls_set_cipher_suites(rintls_ctx* ctx, const u16* cipher_suites,
+                             rin_size_t cipher_suite_count)
+{
+    if (!ctx) return RINTLS_ERR_MEMORY;
+    if (ctx->handshake_started) return RINTLS_ERR_HANDSHAKE;
+
+    int result = tls_handshake_set_client_cipher_suites(
+        &ctx->handshake, cipher_suites, cipher_suite_count);
+    if (result == TLS_HS_ERR_OK) return RINTLS_OK;
+    if (result == TLS_HS_ERR_CIPHER) return RINTLS_ERR_CIPHER;
+    return RINTLS_ERR_HANDSHAKE;
+}
+
 int rintls_set_trusted_time(rintls_ctx* ctx, u64 trusted_unix_time)
 {
     if (!ctx) return RINTLS_ERR_MEMORY;
@@ -721,6 +734,9 @@ int rintls_handshake_step(rintls_ctx* ctx)
     case TLS_HS_ERR_VERSION:
         ctx->last_error = RINTLS_ERR_VERSION;
         break;
+    case TLS_HS_ERR_CIPHER:
+        ctx->last_error = RINTLS_ERR_CIPHER;
+        break;
     case TLS_HS_ERR_CERTIFICATE:
     case TLS_HS_ERR_SIGNATURE:
         ctx->last_error = RINTLS_ERR_CERTIFICATE;
@@ -961,6 +977,7 @@ const char* rintls_strerror(int error)
     case RINTLS_ERR_WANT_WRITE: return "Need writable socket";
     case RINTLS_ERR_TRUST:      return "No trusted certificate anchor";
     case RINTLS_ERR_WANT_CREDENTIALS: return "Need client certificate credentials";
+    case RINTLS_ERR_CIPHER:       return "Unsupported or invalid cipher suite policy";
     default:                    return "Unknown error";
     }
 }

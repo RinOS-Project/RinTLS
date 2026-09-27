@@ -40,6 +40,7 @@ extern "C" {
 #define RINTLS_ERR_WANT_WRITE   -11
 #define RINTLS_ERR_TRUST        -12
 #define RINTLS_ERR_WANT_CREDENTIALS -13
+#define RINTLS_ERR_CIPHER       -14
 
 #define RINTLS_PEER_EVIDENCE_VERSION 0x00010000u
 #define RINTLS_PEER_EVIDENCE_CHAIN_VERIFIED 0x00000001u
@@ -51,6 +52,7 @@ extern "C" {
  * boundary scans at most 254 bytes so a 253-byte hostname may still carry
  * its terminating NUL; longer or unterminated input is rejected. */
 #define RINTLS_MAX_HOSTNAME_BYTES 254u
+#define RINTLS_MAX_CIPHER_SUITES 8u
 
 typedef struct rintls_peer_evidence {
     u32 struct_size;
@@ -187,6 +189,13 @@ int rintls_set_io(rintls_ctx* ctx,
  * options: RINTLS_OPT_* フラグの組み合わせ
  */
 int rintls_set_options(rintls_ctx* ctx, u32 options);
+
+/* Configure the bounded client cipher-suite offer before the handshake.
+ * RinTLS accepts only the cipher suites implemented by its record and
+ * handshake paths; an empty list, duplicate, unknown, or oversized list is
+ * rejected without changing the existing configuration. */
+int rintls_set_cipher_suites(rintls_ctx* ctx, const u16* cipher_suites,
+                             rin_size_t cipher_suite_count);
 
 /* Bind authenticated wall-clock state to this handshake.  Configuration is
  * immutable after the first handshake step. */
