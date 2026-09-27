@@ -1720,7 +1720,11 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
         if (p + 3 > list_end) { chain_err = TLS_HS_ERR_CERTIFICATE; break; }
         u32 cert_len = read_u24(p);
         p += 3;
-        if (p + cert_len > list_end) { chain_err = TLS_HS_ERR_CERTIFICATE; break; }
+        if (cert_len == 0u || cert_len > RINTLS_MAX_CERT_SIZE ||
+            (size_t)(list_end - p) < (size_t)cert_len) {
+            chain_err = TLS_HS_ERR_CERTIFICATE;
+            break;
+        }
 
         const u8* cert_der = p;
         p += cert_len;
