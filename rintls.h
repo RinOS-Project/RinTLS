@@ -57,6 +57,8 @@ extern "C" {
 #define RINTLS_REVOCATION_ENDPOINTS_VERSION 0x00010000u
 #define RINTLS_REVOCATION_EVIDENCE_VERSION 0x00010000u
 #define RINTLS_MAX_CRL_SIZE (256u * 1024u)
+#define RINTLS_MAX_OCSP_SIZE (256u * 1024u)
+#define RINTLS_REVOCATION_SOURCE_OCSP 1u
 #define RINTLS_REVOCATION_SOURCE_CRL 2u
 #define RINTLS_REVOCATION_STATUS_GOOD 1u
 #define RINTLS_REVOCATION_STATUS_REVOKED 2u
@@ -116,10 +118,10 @@ typedef struct rintls_revocation_endpoints {
     u64 reserved[2];
 } rintls_revocation_endpoints;
 
-/* CRL evidence produced by the product-owned fetcher after it has retrieved
- * the endpoint advertised by the peer certificate.  The verifier binds the
- * signed CRL to the exact leaf and immediate issuer retained by this TLS
- * session; it never infers an issuer from the trust store. */
+/* Revocation evidence produced by the product-owned fetcher after it has
+ * retrieved the endpoint advertised by the peer certificate. The verifier
+ * binds signed OCSP/CRL data to the exact leaf and immediate issuer retained
+ * by this TLS session; it never infers an issuer from the trust store. */
 typedef struct rintls_revocation_evidence {
     u32 struct_size;
     u32 version;
@@ -443,6 +445,14 @@ int rintls_get_peer_revocation_endpoints(
 int rintls_verify_peer_crl(rintls_ctx* ctx, const void* crl,
                            rin_size_t crl_len, u64 sequence,
                            rintls_revocation_evidence* evidence);
+
+/* Validate a fetched DER OCSPResponse against the authenticated peer leaf
+ * and the immediate issuer sent in the same TLS Certificate message.
+ * `sequence` is supplied by the bounded evidence owner; no network I/O
+ * occurs here. */
+int rintls_verify_peer_ocsp(rintls_ctx* ctx, const void* response,
+                            rin_size_t response_len, u64 sequence,
+                            rintls_revocation_evidence* evidence);
 
 /*
  * エラーメッセージを取得

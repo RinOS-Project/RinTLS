@@ -19,6 +19,7 @@
 #define X509_MAX_SAN_SIZE       256
 #define X509_MAX_REVOCATION_URL_SIZE 256
 #define X509_MAX_CRL_SIZE        (256u * 1024u)
+#define X509_MAX_OCSP_SIZE       (256u * 1024u)
 #define X509_MAX_CHAIN_DEPTH    10
 /* Maximum hostname scan window including the NUL terminator. */
 #define X509_MAX_HOSTNAME_BYTES 254u
@@ -143,6 +144,11 @@ typedef struct {
         } ecdsa;
     } pubkey;
 
+    /* SubjectPublicKeyInfo BIT STRING contents (without the unused-bits
+     * prefix), retained for RFC 6960 issuerKeyHash binding. */
+    const u8* subject_public_key_data;
+    rin_size_t subject_public_key_len;
+
     /* CA証明書フラグ */
     int is_ca;
     int path_len_constraint;
@@ -172,6 +178,17 @@ typedef struct {
     int authority_authorized;
 } x509_crl_result_t;
 
+typedef struct {
+    int status;
+    x509_time_t this_update;
+    x509_time_t next_update;
+    x509_time_t produced_at;
+    int signature_verified;
+    int issuer_matched;
+    int certificate_matched;
+    int authority_authorized;
+} x509_ocsp_result_t;
+
 /* ═══════════════════════════════════════
  * 証明書パース
  * ═══════════════════════════════════════ */
@@ -194,9 +211,18 @@ int x509_verify_signature(const x509_cert_t* cert, const x509_cert_t* issuer);
  * a mismatched issuer Name, and an issuer without cRLSign authorization all
  * fail closed. */
 int x509_verify_crl(const u8* der, rin_size_t len,
-                   const x509_cert_t* certificate,
-                   const x509_cert_t* issuer,
-                   x509_crl_result_t* result);
+                    const x509_cert_t* certificate,
+                    const x509_cert_t* issuer,
+                    x509_crl_result_t* result);
+
+/* Verify an issuer-signed RFC 6960 BasicOCSPResponse.  The bounded parser
+ * accepts SHA-1/SHA-256 CertID hashes but only SHA-2 response signatures;
+ * delegated responders, nonce-bearing requests, and unsupported response
+ * extensions remain fail-closed until a product owner supplies those scopes. */
+int x509_verify_ocsp(const u8* der, rin_size_t len,
+                     const x509_cert_t* certificate,
+                     const x509_cert_t* issuer,
+                     x509_ocsp_result_t* result);
 
 /* 自己署名証明書かチェック */
 int x509_is_self_signed(const x509_cert_t* cert);

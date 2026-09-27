@@ -4,6 +4,7 @@
  */
 
 #include "cert.h"
+#include "../crypto/sha1.h"
 #include "../crypto/sha256.h"
 #include "../platform/rin_platform.h"
 
@@ -46,6 +47,13 @@ static const u8 OID_AUTHORITY_INFO_ACCESS[] = {
 };
 static const u8 OID_AD_OCSP[] = {
     0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01
+};
+static const u8 OID_OCSP_BASIC[] = {
+    0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01, 0x01
+};
+static const u8 OID_SHA1[] = {0x2B, 0x0E, 0x03, 0x02, 0x1A};
+static const u8 OID_SHA256[] = {
+    0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x02, 0x09
 };
 
 /* ═══════════════════════════════════════
@@ -327,6 +335,9 @@ static int parse_public_key(x509_cert_t* cert, const u8** p, const u8* end)
     (*p)++;
     len--;
     if (unused_bits != 0) return X509_ERR_PARSE;
+
+    cert->subject_public_key_data = *p;
+    cert->subject_public_key_len = len;
 
     if (cert->key_type == X509_KEY_RSA) {
         /* RSAPublicKey ::= SEQUENCE { modulus INTEGER, publicExponent INTEGER } */
@@ -939,6 +950,336 @@ int x509_verify_crl(const u8* der, rin_size_t len,
     parsed.status = revoked ? X509_REVOCATION_REVOKED : X509_REVOCATION_GOOD;
     parsed.signature_verified = 1;
     if (!revoked) parsed.certificate_matched = 1;
+    *result = parsed;
+    return X509_OK;
+}
+
+static int x509_ocsp_read_hash_algorithm(const u8** p, const u8* end)
+{
+    const u8* sequence_end;
+    u8 tag;
+    rin_size_t len;
+    int algorithm = 0;
+
+    if (asn1_read_tag(p, end, &tag, &len) < 0 || tag != ASN1_SEQUENCE)
+        return -1;
+    sequence_end = *p + len;
+    if (asn1_read_tag(p, sequence_end, &tag, &len) < 0 || tag != ASN1_OID)
+        return -1;
+    if (len == sizeof(OID_SHA1) &&
+        rintls_memcmp(*p, OID_SHA1, len) == 0)
+        algorithm = 1;
+    else if (len == sizeof(OID_SHA256) &&
+             rintls_memcmp(*p, OID_SHA256, len) == 0)
+        algorithm = 2;
+    *p += len;
+    if (algorithm == 0) return -1;
+    /* AlgorithmIdentifier parameters are optional for the hash algorithms;
+     * when present, only DER NULL is accepted. */
+    if (*p < sequence_end) {
+        if (asn1_read_tag(p, sequence_end, &tag, &len) < 0 ||
+            tag != ASN1_NULL || len != 0u)
+            return -1;
+        *p += len;
+    }
+    return *p == sequence_end ? algorithm : -1;
+}
+
+static int x509_ocsp_hash_matches(int algorithm, const u8* data,
+                                  rin_size_t data_len, const u8* expected,
+                                  rin_size_t expected_len)
+{
+    u8 digest[32];
+    rin_size_t digest_len = algorithm == 1 ? 20u : 32u;
+    if ((algorithm != 1 && algorithm != 2) || data == NULL ||
+        expected == NULL || expected_len != digest_len)
+        return 0;
+    if (algorithm == 1)
+        sha1_hash(data, data_len, digest);
+    else
+        sha256(data, data_len, digest);
+    return rintls_memcmp(digest, expected, digest_len) == 0;
+}
+
+int x509_verify_ocsp(const u8* der, rin_size_t len,
+                     const x509_cert_t* certificate,
+                     const x509_cert_t* issuer,
+                     x509_ocsp_result_t* result)
+{
+    x509_ocsp_result_t parsed;
+    const u8* p;
+    const u8* end;
+    const u8* response_end;
+    const u8* basic;
+    const u8* basic_end;
+    const u8* response_data;
+    const u8* response_data_end;
+    const u8* response_bytes_end;
+    const u8* signature;
+    rin_size_t basic_len;
+    rin_size_t signature_len;
+    rin_size_t len_value;
+    u8 tag;
+    int response_signature_alg;
+    int responder_issuer = 0;
+    int found = 0;
+
+    if (result != NULL) rintls_memset(result, 0, sizeof(*result));
+    rintls_memset(&parsed, 0, sizeof(parsed));
+    if (der == NULL || len == 0u || len > X509_MAX_OCSP_SIZE ||
+        certificate == NULL || issuer == NULL || result == NULL ||
+        certificate->serial_len == 0u || !issuer->is_ca ||
+        issuer->subject_name == NULL || issuer->subject_name_len == 0u ||
+        issuer->subject_public_key_data == NULL ||
+        issuer->subject_public_key_len == 0u)
+        return X509_ERR_REVOCATION;
+
+    p = der;
+    end = der + len;
+    if (asn1_read_tag(&p, end, &tag, &len_value) < 0 ||
+        tag != ASN1_SEQUENCE || p + len_value != end)
+        return X509_ERR_PARSE;
+    response_end = p + len_value;
+    if (asn1_read_tag(&p, response_end, &tag, &len_value) < 0 ||
+        tag != 0x0Au || len_value != 1u || *p++ != 0u)
+        return X509_ERR_REVOCATION;
+    if (p >= response_end || asn1_read_tag(&p, response_end, &tag,
+                                            &len_value) < 0 ||
+        tag != 0xA0u)
+        return X509_ERR_REVOCATION;
+    response_bytes_end = p + len_value;
+    if (asn1_read_tag(&p, response_bytes_end, &tag, &len_value) < 0 ||
+        tag != ASN1_SEQUENCE)
+        return X509_ERR_PARSE;
+    {
+        const u8* response_bytes_sequence_end = p + len_value;
+        if (asn1_read_tag(&p, response_bytes_sequence_end, &tag,
+                          &len_value) < 0 || tag != ASN1_OID ||
+            len_value != sizeof(OID_OCSP_BASIC) ||
+            rintls_memcmp(p, OID_OCSP_BASIC, len_value) != 0)
+            return X509_ERR_UNSUPPORTED;
+        p += len_value;
+        if (asn1_read_tag(&p, response_bytes_sequence_end, &tag,
+                          &len_value) < 0 || tag != ASN1_OCTET_STRING)
+            return X509_ERR_PARSE;
+        basic = p;
+        basic_len = len_value;
+        p += len_value;
+        if (p != response_bytes_sequence_end ||
+            response_bytes_sequence_end != response_bytes_end)
+            return X509_ERR_PARSE;
+    }
+
+    p = basic;
+    /* BasicOCSPResponse is the exact DER value carried by responseBytes. */
+    if (basic_len == 0u || basic + basic_len > response_bytes_end)
+        return X509_ERR_PARSE;
+    p = basic;
+    basic_end = basic + basic_len;
+    if (asn1_read_tag(&p, basic_end, &tag, &len_value) < 0 ||
+        tag != ASN1_SEQUENCE || p + len_value != basic_end)
+        return X509_ERR_PARSE;
+
+    response_data = p;
+    if (asn1_read_tag(&p, basic_end, &tag, &len_value) < 0 ||
+        tag != ASN1_SEQUENCE)
+        return X509_ERR_PARSE;
+    response_data_end = p + len_value;
+
+    if (p < response_data_end && *p == 0xA0u) {
+        const u8* version_end;
+        u8 version[4];
+        rin_size_t version_len;
+        if (asn1_read_tag(&p, response_data_end, &tag, &len_value) < 0 ||
+            tag != 0xA0u)
+            return X509_ERR_PARSE;
+        version_end = p + len_value;
+        if (asn1_read_integer(&p, version_end, version, &version_len,
+                              sizeof(version)) < 0 || version_len != 1u ||
+            version[0] != 0u || p != version_end)
+            return X509_ERR_UNSUPPORTED;
+    }
+
+    if (p >= response_data_end ||
+        asn1_read_tag(&p, response_data_end, &tag, &len_value) < 0)
+        return X509_ERR_PARSE;
+    if (tag == 0xA1u) {
+        const u8* name_start = p;
+        const u8* name_end = p + len_value;
+        const u8* name_value = p;
+        rin_size_t name_len;
+        if (asn1_read_tag(&p, name_end, &tag, &name_len) < 0 ||
+            tag != ASN1_SEQUENCE || p + name_len != name_end)
+            return X509_ERR_PARSE;
+        if ((rin_size_t)(p + name_len - name_start) ==
+                issuer->subject_name_len &&
+            rintls_memcmp(name_start, issuer->subject_name,
+                          issuer->subject_name_len) == 0)
+            responder_issuer = 1;
+        (void)name_value;
+        p = name_end;
+    } else if (tag == 0x82u) {
+        u8 issuer_key_hash[20];
+        if (len_value != sizeof(issuer_key_hash)) return X509_ERR_PARSE;
+        sha1_hash(issuer->subject_public_key_data,
+                  issuer->subject_public_key_len, issuer_key_hash);
+        responder_issuer =
+            rintls_memcmp(p, issuer_key_hash, sizeof(issuer_key_hash)) == 0;
+        p += len_value;
+    } else {
+        return X509_ERR_UNSUPPORTED;
+    }
+    if (!responder_issuer) return X509_ERR_CHAIN;
+
+    if (asn1_read_time(&p, response_data_end, &parsed.produced_at) < 0)
+        return X509_ERR_PARSE;
+    if (asn1_read_tag(&p, response_data_end, &tag, &len_value) < 0 ||
+        tag != ASN1_SEQUENCE)
+        return X509_ERR_PARSE;
+    {
+        const u8* responses_end = p + len_value;
+        while (p < responses_end) {
+            const u8* single_end;
+            const u8* cert_id_end;
+            const u8* issuer_name_hash;
+            const u8* issuer_key_hash;
+            u8 serial[sizeof(certificate->serial)];
+            rin_size_t issuer_name_hash_len;
+            rin_size_t issuer_key_hash_len;
+            rin_size_t serial_len;
+            x509_time_t single_this;
+            x509_time_t single_next;
+            int hash_algorithm;
+            int single_status = X509_REVOCATION_UNKNOWN;
+            int id_matches;
+
+            if (asn1_read_tag(&p, responses_end, &tag, &len_value) < 0 ||
+                tag != ASN1_SEQUENCE)
+                return X509_ERR_PARSE;
+            single_end = p + len_value;
+            if (asn1_read_tag(&p, single_end, &tag, &len_value) < 0 ||
+                tag != ASN1_SEQUENCE)
+                return X509_ERR_PARSE;
+            cert_id_end = p + len_value;
+            hash_algorithm = x509_ocsp_read_hash_algorithm(&p, cert_id_end);
+            if (hash_algorithm < 0 ||
+                asn1_read_tag(&p, cert_id_end, &tag,
+                              &issuer_name_hash_len) < 0 ||
+                tag != ASN1_OCTET_STRING)
+                return X509_ERR_PARSE;
+            issuer_name_hash = p;
+            p += issuer_name_hash_len;
+            if (asn1_read_tag(&p, cert_id_end, &tag,
+                              &issuer_key_hash_len) < 0 ||
+                tag != ASN1_OCTET_STRING)
+                return X509_ERR_PARSE;
+            issuer_key_hash = p;
+            p += issuer_key_hash_len;
+            if (asn1_read_integer(&p, cert_id_end, serial, &serial_len,
+                                  sizeof(serial)) < 0 || p != cert_id_end)
+                return X509_ERR_PARSE;
+            id_matches = x509_ocsp_hash_matches(
+                hash_algorithm, issuer->subject_name,
+                issuer->subject_name_len, issuer_name_hash,
+                issuer_name_hash_len) &&
+                x509_ocsp_hash_matches(
+                    hash_algorithm, issuer->subject_public_key_data,
+                    issuer->subject_public_key_len, issuer_key_hash,
+                    issuer_key_hash_len) &&
+                x509_serial_equal(serial, serial_len, certificate->serial,
+                                  certificate->serial_len);
+
+            if (asn1_read_tag(&p, single_end, &tag, &len_value) < 0)
+                return X509_ERR_PARSE;
+            if (tag == 0x80u && len_value == 0u) {
+                single_status = X509_REVOCATION_GOOD;
+            } else if (tag == 0xA1u) {
+                const u8* revoked_end = p + len_value;
+                x509_time_t ignored_revocation_time;
+                if (asn1_read_time(&p, revoked_end,
+                                   &ignored_revocation_time) < 0)
+                    return X509_ERR_PARSE;
+                if (p < revoked_end) {
+                    if (asn1_read_tag(&p, revoked_end, &tag, &len_value) < 0 ||
+                        tag != 0xA0u)
+                        return X509_ERR_PARSE;
+                    p += len_value;
+                }
+                if (p != revoked_end) return X509_ERR_PARSE;
+                single_status = X509_REVOCATION_REVOKED;
+            } else if (tag == 0x82u && len_value == 0u) {
+                single_status = X509_REVOCATION_UNKNOWN;
+            } else {
+                return X509_ERR_PARSE;
+            }
+            rintls_memset(&single_this, 0, sizeof(single_this));
+            rintls_memset(&single_next, 0, sizeof(single_next));
+            if (asn1_read_time(&p, single_end, &single_this) < 0)
+                return X509_ERR_PARSE;
+            if (p < single_end && *p == 0xA0u) {
+                const u8* next_end;
+                if (asn1_read_tag(&p, single_end, &tag, &len_value) < 0 ||
+                    tag != 0xA0u)
+                    return X509_ERR_PARSE;
+                next_end = p + len_value;
+                if (asn1_read_time(&p, next_end, &single_next) < 0 ||
+                    p != next_end)
+                    return X509_ERR_PARSE;
+            }
+            if (p < single_end) {
+                if (asn1_read_tag(&p, single_end, &tag, &len_value) < 0 ||
+                    tag != 0xA1u)
+                    return X509_ERR_PARSE;
+                p += len_value;
+            }
+            if (p != single_end) return X509_ERR_PARSE;
+            if (id_matches && !found) {
+                parsed.status = single_status;
+                parsed.this_update = single_this;
+                parsed.next_update = single_next;
+                parsed.certificate_matched = 1;
+                found = 1;
+            }
+        }
+        if (p != responses_end) return X509_ERR_PARSE;
+    }
+    if (p < response_data_end) {
+        if (asn1_read_tag(&p, response_data_end, &tag, &len_value) < 0 ||
+            tag != 0xA1u)
+            return X509_ERR_PARSE;
+        p += len_value;
+    }
+    if (p != response_data_end || !found ||
+        x509_time_cmp(&parsed.next_update, &parsed.this_update) <= 0 ||
+        x509_time_cmp(&parsed.produced_at, &parsed.this_update) < 0 ||
+        x509_time_cmp(&parsed.produced_at, &parsed.next_update) > 0)
+        return X509_ERR_REVOCATION;
+
+    p = response_data_end;
+    response_signature_alg = parse_sig_alg(&p, basic_end);
+    if (response_signature_alg < 0 ||
+        asn1_read_tag(&p, basic_end, &tag, &len_value) < 0 ||
+        tag != ASN1_BIT_STRING || len_value < 1u || *p++ != 0u)
+        return X509_ERR_PARSE;
+    --len_value;
+    signature = p;
+    signature_len = len_value;
+    p += len_value;
+    if (p < basic_end) {
+        if (asn1_read_tag(&p, basic_end, &tag, &len_value) < 0 ||
+            tag != 0xA0u)
+            return X509_ERR_PARSE;
+        p += len_value;
+    }
+    if (p != basic_end ||
+        x509_verify_signed_blob(response_signature_alg, response_data,
+                                (rin_size_t)(response_data_end - response_data),
+                                signature, signature_len, issuer) != X509_OK)
+        return X509_ERR_SIGNATURE;
+
+    parsed.signature_verified = 1;
+    parsed.issuer_matched = 1;
+    parsed.authority_authorized = 1;
     *result = parsed;
     return X509_OK;
 }

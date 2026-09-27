@@ -1080,6 +1080,81 @@ failed:
     return RINTLS_ERR_CERTIFICATE;
 }
 
+int rintls_verify_peer_ocsp(rintls_ctx* ctx, const void* response,
+                            rin_size_t response_len, u64 sequence,
+                            rintls_revocation_evidence* evidence)
+{
+    x509_cert_t leaf;
+    x509_cert_t issuer;
+    x509_ocsp_result_t result;
+    u64 this_update;
+    u64 next_update;
+    u64 produced_at;
+    int parse_result;
+
+    if (evidence != RIN_NULL)
+        rintls_memset(evidence, 0, sizeof(*evidence));
+    if (!ctx || !response || response_len == 0u ||
+        response_len > RINTLS_MAX_OCSP_SIZE || sequence == 0u ||
+        !evidence || !ctx->connected || !ctx->peer_verified ||
+        !ctx->handshake.server_cert || ctx->handshake.server_cert_len == 0u ||
+        !ctx->handshake.server_issuer_cert ||
+        ctx->handshake.server_issuer_cert_len == 0u ||
+        !ctx->handshake.server_issuer_available)
+        return RINTLS_ERR_CERTIFICATE;
+
+    rintls_memset(&leaf, 0, sizeof(leaf));
+    rintls_memset(&issuer, 0, sizeof(issuer));
+    rintls_memset(&result, 0, sizeof(result));
+    parse_result = x509_parse_cert(&leaf, ctx->handshake.server_cert,
+                                   ctx->handshake.server_cert_len);
+    if (parse_result != X509_OK) goto failed;
+    parse_result = x509_parse_cert(&issuer, ctx->handshake.server_issuer_cert,
+                                   ctx->handshake.server_issuer_cert_len);
+    if (parse_result != X509_OK) goto failed;
+    parse_result = x509_verify_ocsp((const u8*)response, response_len,
+                                    &leaf, &issuer, &result);
+    if (parse_result != X509_OK ||
+        !x509_time_to_unix(&result.this_update, &this_update) ||
+        !x509_time_to_unix(&result.next_update, &next_update) ||
+        !x509_time_to_unix(&result.produced_at, &produced_at) ||
+        produced_at < this_update || produced_at > next_update ||
+        (ctx->trusted_unix_time != 0u &&
+         (ctx->trusted_unix_time < this_update ||
+          ctx->trusted_unix_time < produced_at ||
+          ctx->trusted_unix_time > next_update)))
+        goto failed;
+
+    evidence->struct_size = (u32)sizeof(*evidence);
+    evidence->version = RINTLS_REVOCATION_EVIDENCE_VERSION;
+    evidence->status = result.status == X509_REVOCATION_REVOKED
+        ? RINTLS_REVOCATION_STATUS_REVOKED
+        : result.status == X509_REVOCATION_GOOD
+            ? RINTLS_REVOCATION_STATUS_GOOD
+            : 0u;
+    if (evidence->status == 0u) goto failed;
+    evidence->source = RINTLS_REVOCATION_SOURCE_OCSP;
+    evidence->evidence_flags = RINTLS_REVOCATION_EVIDENCE_REQUIRED;
+    evidence->this_update_unix_time = this_update;
+    evidence->next_update_unix_time = next_update;
+    evidence->produced_at_unix_time = produced_at;
+    sha256(ctx->handshake.server_cert, ctx->handshake.server_cert_len,
+           evidence->certificate_sha256);
+    rintls_memcpy(evidence->issuer_sha256,
+                  ctx->handshake.server_issuer_sha256,
+                  sizeof(evidence->issuer_sha256));
+    evidence->sequence = sequence;
+    x509_cert_clear(&issuer);
+    x509_cert_clear(&leaf);
+    return RINTLS_OK;
+
+failed:
+    x509_cert_clear(&issuer);
+    x509_cert_clear(&leaf);
+    rintls_memset(evidence, 0, sizeof(*evidence));
+    return RINTLS_ERR_CERTIFICATE;
+}
+
 const char* rintls_strerror(int error)
 {
     switch (error) {
