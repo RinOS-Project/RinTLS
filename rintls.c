@@ -978,6 +978,7 @@ const char* rintls_strerror(int error)
     case RINTLS_ERR_TRUST:      return "No trusted certificate anchor";
     case RINTLS_ERR_WANT_CREDENTIALS: return "Need client certificate credentials";
     case RINTLS_ERR_CIPHER:       return "Unsupported or invalid cipher suite policy";
+    case RINTLS_ERR_UNSUPPORTED:  return "Operation is not supported by this backend";
     default:                    return "Unknown error";
     }
 }
