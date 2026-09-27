@@ -132,6 +132,10 @@ typedef enum {
 #define TLS_MAX_CLIENT_CERTIFICATE_CHAIN (16u * 1024u)
 #define TLS_MAX_CLIENT_SIGNATURE_BYTES 512u
 #define TLS_MAX_CLIENT_CERTIFICATE_BYTES (16u * 1024u)
+#define TLS_MAX_CLIENT_SIGNATURE_SCHEMES 64u
+#define TLS_MAX_CLIENT_SIGNATURE_ALGORITHMS_BYTES \
+    (2u + TLS_MAX_CLIENT_SIGNATURE_SCHEMES * 2u)
+#define TLS_MAX_CLIENT_CERTIFICATE_AUTHORITIES_BYTES 4098u
 
 typedef int (*tls_trust_anchor_verify_func)(void* opaque,
                                             const x509_cert_t* chain_top);
@@ -219,6 +223,17 @@ typedef struct {
     int client_certificate_declined;
     int client_certificate_sent;
     u16 client_signature_scheme;
+    u16 client_signature_scheme_count;
+    u16 client_signature_schemes[TLS_MAX_CLIENT_SIGNATURE_SCHEMES];
+    u8 client_signature_algorithms[TLS_MAX_CLIENT_SIGNATURE_ALGORITHMS_BYTES];
+    rin_size_t client_signature_algorithms_len;
+    u8 client_signature_algorithms_cert[
+        TLS_MAX_CLIENT_SIGNATURE_ALGORITHMS_BYTES];
+    rin_size_t client_signature_algorithms_cert_len;
+    u8 client_certificate_authorities[
+        TLS_MAX_CLIENT_CERTIFICATE_AUTHORITIES_BYTES];
+    rin_size_t client_certificate_authorities_len;
+    int client_certificate_request_metadata_valid;
 
     /* SNI */
     char server_name[256];
@@ -271,8 +286,21 @@ int tls_handshake_set_client_certificate(
     tls_handshake_ctx_t* ctx, const void* certificate_list,
     rin_size_t certificate_list_len,
     tls_client_certificate_sign_func signer, void* signer_opaque);
+int tls_handshake_set_client_certificate_for_scheme(
+    tls_handshake_ctx_t* ctx, const void* certificate_list,
+    rin_size_t certificate_list_len,
+    tls_client_certificate_sign_func signer, void* signer_opaque,
+    u16 signature_scheme);
 
 int tls_handshake_client_certificate_requested(const tls_handshake_ctx_t* ctx);
+int tls_handshake_get_client_certificate_request(
+    const tls_handshake_ctx_t* ctx, const u8** signature_algorithms,
+    rin_size_t* signature_algorithms_len,
+    const u8** signature_algorithms_cert,
+    rin_size_t* signature_algorithms_cert_len,
+    const u8** certificate_authorities,
+    rin_size_t* certificate_authorities_len,
+    u16* default_signature_scheme);
 
 /* ═══════════════════════════════════════
  * ハンドシェイク実行

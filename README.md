@@ -1,6 +1,24 @@
 # RinTLS
 RinOS用TLSライブラリ
 
+## TLS client-certificate request contract
+
+The TLS 1.3 CertificateRequest parser retains bounded copies of the peer's
+`signature_algorithms`, optional `signature_algorithms_cert`, and optional
+`certificate_authorities` vectors. The one-shot provider reads their exact
+TLS wire encodings through `rintls_get_client_certificate_request()` while
+the request is active. It must install the selected certificate with
+`rintls_set_client_certificate_for_scheme()`; RinTLS rejects a scheme that was
+not offered or is outside its implemented CertificateVerify profile. This
+lets the identity owner choose a key compatible with the server's request
+instead of having RinTLS silently choose the first supported scheme.
+
+Each signature vector is bounded to 64 schemes and the authority vector to
+4098 bytes. Oversized, malformed, duplicate selection extensions, or a
+CertificateRequest without `signature_algorithms` fail the handshake. The
+view's pointers remain owned by the TLS context. This parser contract does not
+provide an identity inventory, user selection UI, or a private key owner.
+
 ## Argon2id KDF boundary
 
 `crypto/argon2.h` exposes the versioned Argon2id v1.3 request contract used by

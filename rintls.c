@@ -279,6 +279,29 @@ int rintls_set_client_certificate(
     return RINTLS_ERR_CERTIFICATE;
 }
 
+int rintls_set_client_certificate_for_scheme(
+    rintls_ctx* ctx, const void* certificate_list,
+    rin_size_t certificate_list_len,
+    rintls_client_certificate_sign_func signer, void* signer_opaque,
+    u16 signature_scheme)
+{
+    if (!ctx) return RINTLS_ERR_MEMORY;
+    if (!ctx->handshake_started ||
+        ctx->handshake.state != TLS_STATE_CLIENT_CERTIFICATE)
+        return RINTLS_ERR_HANDSHAKE;
+    int result = tls_handshake_set_client_certificate_for_scheme(
+        &ctx->handshake, certificate_list, certificate_list_len,
+        (tls_client_certificate_sign_func)signer, signer_opaque,
+        signature_scheme);
+    if (result == TLS_HS_ERR_OK) {
+        ctx->client_certificate_configured = 1;
+        return RINTLS_OK;
+    }
+    if (result == TLS_HS_ERR_IO) return RINTLS_ERR_MEMORY;
+    if (result == TLS_HS_ERR_UNEXPECTED) return RINTLS_ERR_HANDSHAKE;
+    return RINTLS_ERR_CERTIFICATE;
+}
+
 int rintls_set_client_certificate_provider(
     rintls_ctx* ctx, rintls_client_certificate_provider_func provider,
     void* provider_opaque)
@@ -300,6 +323,39 @@ int rintls_set_client_certificate_provider(
 int rintls_client_certificate_requested(const rintls_ctx* ctx)
 {
     return ctx ? tls_handshake_client_certificate_requested(&ctx->handshake) : 0;
+}
+
+int rintls_get_client_certificate_request(
+    const rintls_ctx* ctx, rintls_client_certificate_request* request)
+{
+    const u8* signature_algorithms = RIN_NULL;
+    const u8* signature_algorithms_cert = RIN_NULL;
+    const u8* certificate_authorities = RIN_NULL;
+    rin_size_t signature_algorithms_len = 0u;
+    rin_size_t signature_algorithms_cert_len = 0u;
+    rin_size_t certificate_authorities_len = 0u;
+    u16 default_signature_scheme = 0u;
+    if (!ctx || !request || request->struct_size < sizeof(*request))
+        return RINTLS_ERR_CERTIFICATE;
+    int result = tls_handshake_get_client_certificate_request(
+        &ctx->handshake, &signature_algorithms, &signature_algorithms_len,
+        &signature_algorithms_cert, &signature_algorithms_cert_len,
+        &certificate_authorities, &certificate_authorities_len,
+        &default_signature_scheme);
+    if (result != TLS_HS_ERR_OK) return RINTLS_ERR_CERTIFICATE;
+    request->version = RINTLS_CLIENT_CERTIFICATE_REQUEST_VERSION;
+    request->signature_algorithms = signature_algorithms;
+    request->signature_algorithms_size =
+        (u32)signature_algorithms_len;
+    request->signature_algorithms_cert = signature_algorithms_cert;
+    request->signature_algorithms_cert_size =
+        (u32)signature_algorithms_cert_len;
+    request->certificate_authorities = certificate_authorities;
+    request->certificate_authorities_size =
+        (u32)certificate_authorities_len;
+    request->default_signature_scheme = default_signature_scheme;
+    request->reserved = 0u;
+    return RINTLS_OK;
 }
 
 int rintls_client_certificate_configured(const rintls_ctx* ctx)

@@ -91,15 +91,38 @@ typedef int (*rintls_client_certificate_sign_func)(
     rin_size_t* signature_len);
 
 /* Optional authenticated provider invoked exactly once after a TLS 1.3
- * CertificateRequest is received. The provider must call
- * rintls_set_client_certificate() with a validated public certificate_list
- * and signer capability; private key material never enters RinTLS. */
+ * CertificateRequest is received. The provider reads the bounded request
+ * constraints with rintls_get_client_certificate_request(), then installs
+ * its public certificate_list and signer with an offered scheme via
+ * rintls_set_client_certificate_for_scheme(); private key material never
+ * enters RinTLS. */
 typedef int (*rintls_client_certificate_provider_func)(
     rintls_ctx* ctx, void* opaque);
 
 #define RINTLS_MAX_CLIENT_CERTIFICATE_CHAIN (16u * 1024u)
 #define RINTLS_MAX_CLIENT_CERTIFICATE_BYTES (16u * 1024u)
 #define RINTLS_MAX_CLIENT_SIGNATURE_BYTES  512u
+#define RINTLS_CLIENT_CERTIFICATE_REQUEST_VERSION 1u
+#define RINTLS_MAX_CLIENT_SIGNATURE_SCHEMES 64u
+#define RINTLS_MAX_CLIENT_SIGNATURE_ALGORITHMS_BYTES (2u + 64u * 2u)
+#define RINTLS_MAX_CLIENT_CERTIFICATE_AUTHORITIES_BYTES 4098u
+
+/* Borrowed TLS 1.3 CertificateRequest constraints. Each vector uses its TLS
+ * wire encoding (uint16 vector length followed by uint16 schemes or uint16
+ * DistinguishedName length + DER bytes). Pointers remain owned by ctx and
+ * are valid until ctx is freed. */
+typedef struct rintls_client_certificate_request {
+    u32 struct_size;
+    u32 version;
+    const u8* signature_algorithms;
+    u32 signature_algorithms_size;
+    const u8* signature_algorithms_cert;
+    u32 signature_algorithms_cert_size;
+    const u8* certificate_authorities;
+    u32 certificate_authorities_size;
+    u16 default_signature_scheme;
+    u16 reserved;
+} rintls_client_certificate_request;
 
 /* ═══════════════════════════════════════
  * I/Oコールバック型
@@ -182,6 +205,15 @@ int rintls_set_client_certificate(
     rin_size_t certificate_list_len,
     rintls_client_certificate_sign_func signer, void* signer_opaque);
 
+/* Select a CertificateVerify scheme explicitly. It must be offered by the
+ * peer and implemented by RinTLS. This is the identity-provider path: the
+ * selected certificate/key pair determines the scheme, not server ordering. */
+int rintls_set_client_certificate_for_scheme(
+    rintls_ctx* ctx, const void* certificate_list,
+    rin_size_t certificate_list_len,
+    rintls_client_certificate_sign_func signer, void* signer_opaque,
+    u16 signature_scheme);
+
 /* Bind a one-shot CertificateRequest provider before the handshake. */
 int rintls_set_client_certificate_provider(
     rintls_ctx* ctx, rintls_client_certificate_provider_func provider,
@@ -189,6 +221,11 @@ int rintls_set_client_certificate_provider(
 
 /* Whether the peer requested a client certificate during this handshake. */
 int rintls_client_certificate_requested(const rintls_ctx* ctx);
+
+/* Return the authenticated TLS 1.3 CertificateRequest constraints to the
+ * one-shot provider. The returned vectors are borrowed from ctx. */
+int rintls_get_client_certificate_request(
+    const rintls_ctx* ctx, rintls_client_certificate_request* request);
 
 /* Whether the application has answered the client-certificate request. */
 int rintls_client_certificate_configured(const rintls_ctx* ctx);
