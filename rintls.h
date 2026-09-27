@@ -55,6 +55,19 @@ extern "C" {
     (RINTLS_PEER_CERTIFICATE_BINDING_LEAF | \
      RINTLS_PEER_CERTIFICATE_BINDING_ISSUER)
 #define RINTLS_REVOCATION_ENDPOINTS_VERSION 0x00010000u
+#define RINTLS_REVOCATION_EVIDENCE_VERSION 0x00010000u
+#define RINTLS_REVOCATION_SOURCE_CRL 2u
+#define RINTLS_REVOCATION_STATUS_GOOD 1u
+#define RINTLS_REVOCATION_STATUS_REVOKED 2u
+#define RINTLS_REVOCATION_EVIDENCE_SIGNATURE_VERIFIED 0x00000001u
+#define RINTLS_REVOCATION_EVIDENCE_CERTIFICATE_MATCHED 0x00000002u
+#define RINTLS_REVOCATION_EVIDENCE_ISSUER_MATCHED 0x00000004u
+#define RINTLS_REVOCATION_EVIDENCE_AUTHORITY_AUTHORIZED 0x00000008u
+#define RINTLS_REVOCATION_EVIDENCE_REQUIRED \
+    (RINTLS_REVOCATION_EVIDENCE_SIGNATURE_VERIFIED | \
+     RINTLS_REVOCATION_EVIDENCE_CERTIFICATE_MATCHED | \
+     RINTLS_REVOCATION_EVIDENCE_ISSUER_MATCHED | \
+     RINTLS_REVOCATION_EVIDENCE_AUTHORITY_AUTHORIZED)
 #define RINTLS_MAX_REVOCATION_URL_BYTES 256u
 
 /* Maximum DNS hostname text length is 253 bytes.  The public C-string
@@ -102,16 +115,40 @@ typedef struct rintls_revocation_endpoints {
     u64 reserved[2];
 } rintls_revocation_endpoints;
 
+/* CRL evidence produced by the product-owned fetcher after it has retrieved
+ * the endpoint advertised by the peer certificate.  The verifier binds the
+ * signed CRL to the exact leaf and immediate issuer retained by this TLS
+ * session; it never infers an issuer from the trust store. */
+typedef struct rintls_revocation_evidence {
+    u32 struct_size;
+    u32 version;
+    u32 status;
+    u32 source;
+    u32 evidence_flags;
+    u32 reserved0;
+    u64 this_update_unix_time;
+    u64 next_update_unix_time;
+    u64 produced_at_unix_time;
+    u8 certificate_sha256[32];
+    u8 issuer_sha256[32];
+    u64 sequence;
+    u64 reserved[2];
+} rintls_revocation_evidence;
+
 #if defined(__cplusplus)
 static_assert(sizeof(rintls_revocation_endpoints) == 536u,
               "rintls_revocation_endpoints ABI drift");
 static_assert(sizeof(rintls_peer_certificate_binding) == 96u,
               "rintls_peer_certificate_binding ABI drift");
+static_assert(sizeof(rintls_revocation_evidence) == 136u,
+              "rintls_revocation_evidence ABI drift");
 #else
 _Static_assert(sizeof(rintls_revocation_endpoints) == 536u,
                "rintls_revocation_endpoints ABI drift");
 _Static_assert(sizeof(rintls_peer_certificate_binding) == 96u,
                "rintls_peer_certificate_binding ABI drift");
+_Static_assert(sizeof(rintls_revocation_evidence) == 136u,
+               "rintls_revocation_evidence ABI drift");
 #endif
 
 /* ═══════════════════════════════════════
@@ -397,6 +434,14 @@ int rintls_get_peer_certificate(rintls_ctx* ctx, void* buffer,
  * is zeroed on failure; an empty URI means that extension was not advertised. */
 int rintls_get_peer_revocation_endpoints(
     rintls_ctx* ctx, rintls_revocation_endpoints* endpoints);
+
+/* Validate a fetched DER CRL against the authenticated peer leaf and the
+ * immediate issuer sent in the same TLS Certificate message.  `sequence`
+ * must be supplied by the owner that controls its bounded evidence/cache
+ * generation.  No network I/O occurs in this function. */
+int rintls_verify_peer_crl(rintls_ctx* ctx, const void* crl,
+                           rin_size_t crl_len, u64 sequence,
+                           rintls_revocation_evidence* evidence);
 
 /*
  * エラーメッセージを取得

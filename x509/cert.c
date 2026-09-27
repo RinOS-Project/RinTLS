@@ -38,6 +38,7 @@ static const u8 OID_CN[] = {0x55, 0x04, 0x03};  /* commonName */
 
 /* 拡張OID */
 static const u8 OID_BASIC_CONSTRAINTS[] = {0x55, 0x1D, 0x13};
+static const u8 OID_KEY_USAGE[] = {0x55, 0x1D, 0x0F};
 static const u8 OID_SUBJECT_ALT_NAME[] = {0x55, 0x1D, 0x11};
 static const u8 OID_CRL_DISTRIBUTION_POINTS[] = {0x55, 0x1D, 0x1F};
 static const u8 OID_AUTHORITY_INFO_ACCESS[] = {
@@ -494,6 +495,8 @@ static int parse_extensions(x509_cert_t* cert, const u8** p, const u8* end)
 
         int is_basic_constraints = (len == sizeof(OID_BASIC_CONSTRAINTS) &&
                                     rintls_memcmp(*p, OID_BASIC_CONSTRAINTS, len) == 0);
+        int is_key_usage = (len == sizeof(OID_KEY_USAGE) &&
+                            rintls_memcmp(*p, OID_KEY_USAGE, len) == 0);
         int is_san = (len == sizeof(OID_SUBJECT_ALT_NAME) &&
                       rintls_memcmp(*p, OID_SUBJECT_ALT_NAME, len) == 0);
         int is_crl_distribution_points =
@@ -537,6 +540,16 @@ static int parse_extensions(x509_cert_t* cert, const u8** p, const u8* end)
                         cert->is_ca = (*bc_p != 0);
                     }
                 }
+            }
+        } else if (is_key_usage) {
+            /* KeyUsage ::= BIT STRING.  cRLSign is bit 6, which is bit 1
+             * in the first content octet after the unused-bit count. */
+            const u8* ku_p = value_data;
+            const u8* ku_end = value_data + value_len;
+            if (asn1_read_tag(&ku_p, ku_end, &tag, &len) == 0 &&
+                tag == ASN1_BIT_STRING && len >= 2u && *ku_p <= 7u) {
+                cert->has_key_usage = 1;
+                cert->can_sign_crl = (ku_p[1] & 0x02u) != 0u;
             }
         } else if (is_san) {
             /* SubjectAltName ::= GeneralNames */
@@ -697,31 +710,40 @@ void x509_cert_clear(x509_cert_t* cert)
  * 証明書検証
  * ═══════════════════════════════════════ */
 
-int x509_verify_signature(const x509_cert_t* cert, const x509_cert_t* issuer)
+static int x509_verify_signed_blob(int sig_alg,
+                                   const u8* signed_data,
+                                   rin_size_t signed_len,
+                                   const u8* signature,
+                                   rin_size_t signature_len,
+                                   const x509_cert_t* issuer)
 {
     u8 hash[64];
     rin_size_t hash_len;
 
-    /* TBSCertificateをハッシュ */
-    switch (cert->sig_alg) {
+    if (!signed_data || signed_len == 0u || !signature ||
+        signature_len == 0u || !issuer) {
+        return X509_ERR_PARSE;
+    }
+
+    /* Hash the exact signed DER payload. */
+    switch (sig_alg) {
     case X509_SIG_RSA_SHA256:
     case X509_SIG_ECDSA_SHA256:
-        sha256(cert->tbs_data, cert->tbs_len, hash);
+        sha256(signed_data, signed_len, hash);
         hash_len = 32;
         break;
     case X509_SIG_RSA_SHA384:
     case X509_SIG_ECDSA_SHA384:
-        sha384(cert->tbs_data, cert->tbs_len, hash);
+        sha384(signed_data, signed_len, hash);
         hash_len = 48;
         break;
     case X509_SIG_RSA_SHA512:
     case X509_SIG_ECDSA_SHA512:
-        sha512(cert->tbs_data, cert->tbs_len, hash);
+        sha512(signed_data, signed_len, hash);
         hash_len = 64;
         break;
     case X509_SIG_RSA_SHA1:
-        /* SHA-1 is recognized so legacy self-signed trust anchors can be
-         * provisioned, but no peer-chain edge may validate with it. */
+        /* SHA-1 is recognized for legacy parsing only. */
         return X509_ERR_UNSUPPORTED;
     default:
         return X509_ERR_UNSUPPORTED;
@@ -729,23 +751,23 @@ int x509_verify_signature(const x509_cert_t* cert, const x509_cert_t* issuer)
 
     /* 署名を検証 */
     if (issuer->key_type == X509_KEY_RSA) {
-        if (cert->sig_alg != X509_SIG_RSA_SHA256 &&
-            cert->sig_alg != X509_SIG_RSA_SHA384 &&
-            cert->sig_alg != X509_SIG_RSA_SHA512) return X509_ERR_UNSUPPORTED;
-        int hash_alg = (cert->sig_alg == X509_SIG_RSA_SHA256) ? RSA_HASH_SHA256 :
-                       (cert->sig_alg == X509_SIG_RSA_SHA384) ? RSA_HASH_SHA384 : RSA_HASH_SHA512;
+        if (sig_alg != X509_SIG_RSA_SHA256 &&
+            sig_alg != X509_SIG_RSA_SHA384 &&
+            sig_alg != X509_SIG_RSA_SHA512) return X509_ERR_UNSUPPORTED;
+        int hash_alg = (sig_alg == X509_SIG_RSA_SHA256) ? RSA_HASH_SHA256 :
+                       (sig_alg == X509_SIG_RSA_SHA384) ? RSA_HASH_SHA384 : RSA_HASH_SHA512;
 
-        if (rsa_pkcs1_verify(cert->signature, cert->signature_len,
+        if (rsa_pkcs1_verify(signature, signature_len,
                              hash, hash_len, hash_alg,
                              &issuer->pubkey.rsa) != RSA_OK) {
             return X509_ERR_SIGNATURE;
         }
     } else if (issuer->key_type == X509_KEY_ECDSA) {
-        if (cert->sig_alg != X509_SIG_ECDSA_SHA256 &&
-            cert->sig_alg != X509_SIG_ECDSA_SHA384 &&
-            cert->sig_alg != X509_SIG_ECDSA_SHA512) return X509_ERR_UNSUPPORTED;
+        if (sig_alg != X509_SIG_ECDSA_SHA256 &&
+            sig_alg != X509_SIG_ECDSA_SHA384 &&
+            sig_alg != X509_SIG_ECDSA_SHA512) return X509_ERR_UNSUPPORTED;
         if (ecdsa_nist_verify(issuer->pubkey.ecdsa.curve,
-                              cert->signature, cert->signature_len,
+                              signature, signature_len,
                               hash, hash_len, issuer->pubkey.ecdsa.point,
                               issuer->pubkey.ecdsa.point_len) != ECDH_OK) {
             return X509_ERR_SIGNATURE;
@@ -754,6 +776,169 @@ int x509_verify_signature(const x509_cert_t* cert, const x509_cert_t* issuer)
         return X509_ERR_UNSUPPORTED;
     }
 
+    return X509_OK;
+}
+
+int x509_verify_signature(const x509_cert_t* cert, const x509_cert_t* issuer)
+{
+    if (!cert || !issuer) return X509_ERR_PARSE;
+    return x509_verify_signed_blob(cert->sig_alg, cert->tbs_data,
+                                   cert->tbs_len, cert->signature,
+                                   cert->signature_len, issuer);
+}
+
+static int x509_serial_equal(const u8* left, rin_size_t left_len,
+                             const u8* right, rin_size_t right_len)
+{
+    return left != NULL && right != NULL && left_len != 0u &&
+           left_len == right_len &&
+           rintls_memcmp(left, right, left_len) == 0;
+}
+
+int x509_verify_crl(const u8* der, rin_size_t len,
+                    const x509_cert_t* certificate,
+                    const x509_cert_t* issuer,
+                    x509_crl_result_t* result)
+{
+    x509_crl_result_t parsed;
+    const u8* p;
+    const u8* end;
+    const u8* crl_end;
+    const u8* tbs_data;
+    const u8* tbs_end;
+    const u8* issuer_name;
+    rin_size_t issuer_name_len;
+    rin_size_t slen;
+    u8 tag;
+    int tbs_sig_alg;
+    int outer_sig_alg;
+    int revoked = 0;
+
+    if (result != NULL) rintls_memset(result, 0, sizeof(*result));
+    rintls_memset(&parsed, 0, sizeof(parsed));
+    if (!der || len == 0u || !certificate || !issuer || !result ||
+        !issuer->subject_name || issuer->subject_name_len == 0u ||
+        !issuer->is_ca || (issuer->has_key_usage && !issuer->can_sign_crl)) {
+        return X509_ERR_REVOCATION;
+    }
+
+    p = der;
+    end = der + len;
+    if (asn1_read_tag(&p, end, &tag, &slen) < 0 || tag != ASN1_SEQUENCE)
+        return X509_ERR_PARSE;
+    crl_end = p + slen;
+    if (crl_end != end) return X509_ERR_PARSE;
+
+    /* CertificateList.tbsCertList is the exact signed DER span. */
+    tbs_data = p;
+    if (asn1_read_tag(&p, crl_end, &tag, &slen) < 0 ||
+        tag != ASN1_SEQUENCE)
+        return X509_ERR_PARSE;
+    tbs_end = p + slen;
+
+    /* v2 CRLs carry INTEGER 1.  v1 omits the field; both are parsed, but no
+     * other version is admitted. */
+    if (p < tbs_end && *p == ASN1_INTEGER) {
+        u8 version[4];
+        rin_size_t version_len;
+        if (asn1_read_integer(&p, tbs_end, version, &version_len,
+                              sizeof(version)) < 0 || version_len != 1u ||
+            version[0] != 1u)
+            return X509_ERR_UNSUPPORTED;
+    }
+
+    tbs_sig_alg = parse_sig_alg(&p, tbs_end);
+    if (tbs_sig_alg < 0) return X509_ERR_UNSUPPORTED;
+
+    issuer_name = p;
+    {
+        char ignored_cn[X509_MAX_CN_SIZE];
+        if (parse_name_cn(&p, tbs_end, ignored_cn, sizeof(ignored_cn)) < 0)
+            return X509_ERR_PARSE;
+    }
+    issuer_name_len = (rin_size_t)(p - issuer_name);
+    if (issuer_name_len != issuer->subject_name_len ||
+        rintls_memcmp(issuer_name, issuer->subject_name, issuer_name_len) != 0)
+        return X509_ERR_CHAIN;
+    parsed.issuer_matched = 1;
+    parsed.authority_authorized = 1;
+
+    if (asn1_read_time(&p, tbs_end, &parsed.this_update) < 0)
+        return X509_ERR_PARSE;
+    /* A CRL without nextUpdate cannot be bounded by the shared revocation
+     * policy, so it is intentionally rejected rather than treated as fresh. */
+    if (p >= tbs_end || (*p != ASN1_UTC_TIME && *p != ASN1_GENERALIZED_TIME) ||
+        asn1_read_time(&p, tbs_end, &parsed.next_update) < 0)
+        return X509_ERR_REVOCATION;
+    if (x509_time_cmp(&parsed.next_update, &parsed.this_update) <= 0)
+        return X509_ERR_REVOCATION;
+
+    /* revokedCertificates is optional. */
+    if (p < tbs_end && *p == ASN1_SEQUENCE) {
+        const u8* revoked_end;
+        if (asn1_read_tag(&p, tbs_end, &tag, &slen) < 0 ||
+            tag != ASN1_SEQUENCE)
+            return X509_ERR_PARSE;
+        revoked_end = p + slen;
+        while (p < revoked_end) {
+            const u8* entry_end;
+            u8 serial[sizeof(certificate->serial)];
+            rin_size_t serial_len;
+            x509_time_t revocation_time;
+            if (asn1_read_tag(&p, revoked_end, &tag, &slen) < 0 ||
+                tag != ASN1_SEQUENCE)
+                return X509_ERR_PARSE;
+            entry_end = p + slen;
+            if (asn1_read_integer(&p, entry_end, serial, &serial_len,
+                                  sizeof(serial)) < 0 || serial_len == 0u ||
+                asn1_read_time(&p, entry_end, &revocation_time) < 0)
+                return X509_ERR_PARSE;
+            if (x509_serial_equal(serial, serial_len, certificate->serial,
+                                  certificate->serial_len)) {
+                revoked = 1;
+                parsed.certificate_matched = 1;
+            }
+            /* Entry extensions are not needed for the status decision, but
+             * malformed trailing bytes must not be accepted. */
+            if (p < entry_end) {
+                if (*p != ASN1_SEQUENCE && *p != ASN1_CONTEXT_0)
+                    return X509_ERR_PARSE;
+                if (asn1_read_tag(&p, entry_end, &tag, &slen) < 0)
+                    return X509_ERR_PARSE;
+                p += slen;
+            }
+            if (p != entry_end) return X509_ERR_PARSE;
+        }
+        if (p != revoked_end) return X509_ERR_PARSE;
+    }
+
+    /* v2 CRL extensions are [0] EXPLICIT and do not affect this bounded
+     * status parser.  Keep the enclosing bytes well formed. */
+    if (p < tbs_end) {
+        if (*p != ASN1_CONTEXT_0 ||
+            asn1_read_tag(&p, tbs_end, &tag, &slen) < 0 ||
+            tag != ASN1_CONTEXT_0)
+            return X509_ERR_PARSE;
+        p += slen;
+    }
+    if (p != tbs_end) return X509_ERR_PARSE;
+
+    p = tbs_end;
+    outer_sig_alg = parse_sig_alg(&p, crl_end);
+    if (outer_sig_alg != tbs_sig_alg) return X509_ERR_PARSE;
+    if (asn1_read_tag(&p, crl_end, &tag, &slen) < 0 ||
+        tag != ASN1_BIT_STRING || slen < 1u || *p++ != 0u || --slen == 0u ||
+        slen > 512u || p + slen != crl_end)
+        return X509_ERR_PARSE;
+    if (x509_verify_signed_blob(tbs_sig_alg, tbs_data,
+                                (rin_size_t)(tbs_end - tbs_data), p, slen,
+                                issuer) != X509_OK)
+        return X509_ERR_SIGNATURE;
+
+    parsed.status = revoked ? X509_REVOCATION_REVOKED : X509_REVOCATION_GOOD;
+    parsed.signature_verified = 1;
+    if (!revoked) parsed.certificate_matched = 1;
+    *result = parsed;
     return X509_OK;
 }
 
@@ -839,6 +1024,32 @@ static u32 x509_days_in_month(u32 year, u32 month)
     if (month == 0u || month > 12u) return 0u;
     if (month == 2u && x509_is_leap_year(year)) return 29u;
     return days[month - 1u];
+}
+
+int x509_time_to_unix(const x509_time_t* time, u64* unix_time)
+{
+    u64 days = 0u;
+    if (unix_time != NULL) *unix_time = 0u;
+    if (!time || !unix_time || time->year < 1970 || time->year > 9999 ||
+        time->month < 1 || time->month > 12 || time->day < 1 ||
+        time->day > (int)x509_days_in_month((u32)time->year,
+                                             (u32)time->month) ||
+        time->hour < 0 || time->hour > 23 || time->minute < 0 ||
+        time->minute > 59 || time->second < 0 || time->second > 59) {
+        return 0;
+    }
+    for (u32 year = 1970u; year < (u32)time->year; ++year)
+        days += x509_is_leap_year(year) ? 366u : 365u;
+    for (u32 month = 1u; month < (u32)time->month; ++month)
+        days += x509_days_in_month((u32)time->year, month);
+    days += (u64)(time->day - 1);
+    if (days > (UINT64_MAX - (u64)time->hour * 3600u -
+                (u64)time->minute * 60u - (u64)time->second) / 86400u) {
+        return 0;
+    }
+    *unix_time = days * 86400u + (u64)time->hour * 3600u +
+                 (u64)time->minute * 60u + (u64)time->second;
+    return 1;
 }
 
 static int x509_time_from_unix(u64 unix_time, x509_time_t* time)

@@ -301,6 +301,10 @@ void tls_handshake_clear(tls_handshake_ctx_t* ctx)
         rintls_mem_free(ctx->server_cert);
         ctx->server_cert = RIN_NULL;
     }
+    if (ctx->server_issuer_cert) {
+        rintls_mem_free(ctx->server_issuer_cert);
+        ctx->server_issuer_cert = RIN_NULL;
+    }
     if (ctx->client_certificate_list) {
         rintls_secure_zero(ctx->client_certificate_list,
                            ctx->client_certificate_list_len);
@@ -1814,6 +1818,10 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
             break;
         }
         if (cert_index == 1) {
+            ctx->server_issuer_cert = rintls_malloc(cert_len);
+            if (!ctx->server_issuer_cert) return TLS_HS_ERR_IO;
+            rintls_memcpy(ctx->server_issuer_cert, cert_der, cert_len);
+            ctx->server_issuer_cert_len = cert_len;
             sha256(cert_der, cert_len, ctx->server_issuer_sha256);
             ctx->server_issuer_available = 1;
         }

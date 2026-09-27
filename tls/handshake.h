@@ -208,6 +208,11 @@ typedef struct {
     /* 証明書 */
     u8* server_cert;
     rin_size_t server_cert_len;
+    /* The DER of the immediate issuer is retained only for the product-owned
+     * revocation verifier.  Its digest alone is exposed to ordinary callers
+     * so an owner cannot silently substitute a trust anchor. */
+    u8* server_issuer_cert;
+    rin_size_t server_issuer_cert_len;
     /* SHA-256 of the first issuer sent after the leaf.  A missing issuer is
      * kept unavailable instead of guessing from the trust anchor. */
     u8 server_issuer_sha256[32];

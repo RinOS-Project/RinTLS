@@ -31,6 +31,16 @@
 #define X509_ERR_CA             -5
 #define X509_ERR_NAME           -6
 #define X509_ERR_CHAIN          -7
+#define X509_ERR_REVOCATION     -8
+
+/* A parsed CRL is useful only after its signature, issuer name, and
+ * certificate serial have been checked together.  The parser deliberately
+ * returns status separately so a product revocation owner can translate it
+ * into its own policy/evidence ABI without treating a revoked certificate as
+ * a parser failure. */
+#define X509_REVOCATION_GOOD       0
+#define X509_REVOCATION_REVOKED    1
+#define X509_REVOCATION_UNKNOWN    2
 
 /* 公開鍵タイプ */
 #define X509_KEY_RSA            1
@@ -135,6 +145,8 @@ typedef struct {
     /* CA証明書フラグ */
     int is_ca;
     int path_len_constraint;
+    int has_key_usage;
+    int can_sign_crl;
 
     /* TBSCertificate (署名対象) の位置 */
     const u8* tbs_data;
@@ -148,6 +160,16 @@ typedef struct {
     const u8* raw_data;
     rin_size_t raw_len;
 } x509_cert_t;
+
+typedef struct {
+    int status;
+    x509_time_t this_update;
+    x509_time_t next_update;
+    int signature_verified;
+    int issuer_matched;
+    int certificate_matched;
+    int authority_authorized;
+} x509_crl_result_t;
 
 /* ═══════════════════════════════════════
  * 証明書パース
@@ -165,6 +187,15 @@ void x509_cert_clear(x509_cert_t* cert);
 
 /* 証明書の署名を検証 (issuerの公開鍵で)。SHA-1は常にUNSUPPORTED。 */
 int x509_verify_signature(const x509_cert_t* cert, const x509_cert_t* issuer);
+
+/* Verify a DER CertificateList against the already authenticated issuer and
+ * leaf certificate.  Missing nextUpdate, unsupported signature algorithms,
+ * a mismatched issuer Name, and an issuer without cRLSign authorization all
+ * fail closed. */
+int x509_verify_crl(const u8* der, rin_size_t len,
+                   const x509_cert_t* certificate,
+                   const x509_cert_t* issuer,
+                   x509_crl_result_t* result);
 
 /* 自己署名証明書かチェック */
 int x509_is_self_signed(const x509_cert_t* cert);
@@ -225,6 +256,9 @@ int asn1_read_time(const u8** p, const u8* end, x509_time_t* time);
 
 /* 時刻を比較 (-1: a < b, 0: a == b, 1: a > b) */
 int x509_time_cmp(const x509_time_t* a, const x509_time_t* b);
+
+/* Convert a validated UTC/GeneralizedTime value into Unix seconds. */
+int x509_time_to_unix(const x509_time_t* time, u64* unix_time);
 
 /* 現在時刻を取得 */
 void x509_get_current_time(x509_time_t* time);
