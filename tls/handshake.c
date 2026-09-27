@@ -1813,6 +1813,10 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
             chain_err = TLS_HS_ERR_CERTIFICATE;
             break;
         }
+        if (cert_index == 1) {
+            sha256(cert_der, cert_len, ctx->server_issuer_sha256);
+            ctx->server_issuer_available = 1;
+        }
         if ((ctx->trusted_unix_time != 0u
                  ? x509_check_validity_at(cur, ctx->trusted_unix_time)
                  : x509_check_validity(cur)) != X509_OK) {

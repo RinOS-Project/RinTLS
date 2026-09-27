@@ -48,6 +48,12 @@ extern "C" {
 #define RINTLS_PEER_EVIDENCE_HOSTNAME_VERIFIED 0x00000002u
 #define RINTLS_PEER_EVIDENCE_TRUSTED_TIME 0x00000004u
 #define RINTLS_PEER_EVIDENCE_REQUIRED 0x00000007u
+#define RINTLS_PEER_CERTIFICATE_BINDING_VERSION 0x00010000u
+#define RINTLS_PEER_CERTIFICATE_BINDING_LEAF 0x00000001u
+#define RINTLS_PEER_CERTIFICATE_BINDING_ISSUER 0x00000002u
+#define RINTLS_PEER_CERTIFICATE_BINDING_REQUIRED \
+    (RINTLS_PEER_CERTIFICATE_BINDING_LEAF | \
+     RINTLS_PEER_CERTIFICATE_BINDING_ISSUER)
 #define RINTLS_REVOCATION_ENDPOINTS_VERSION 0x00010000u
 #define RINTLS_MAX_REVOCATION_URL_BYTES 256u
 
@@ -70,6 +76,20 @@ typedef struct rintls_peer_evidence {
     u64 reserved[2];
 } rintls_peer_evidence;
 
+/* Cryptographic scope for revocation evidence.  The issuer is only returned
+ * when it was present in the authenticated peer chain; callers must reject
+ * revocation evidence when this binding is unavailable rather than guessing
+ * from a trust anchor or subject name. */
+typedef struct rintls_peer_certificate_binding {
+    u32 struct_size;
+    u32 version;
+    u32 binding_flags;
+    u32 reserved0;
+    u8 leaf_sha256[32];
+    u8 issuer_sha256[32];
+    u64 reserved[2];
+} rintls_peer_certificate_binding;
+
 /* Revocation locations advertised by the authenticated peer certificate.
  * These are discovery data only: an endpoint response must still be fetched
  * by a product-owned transport and validated against the same leaf, issuer,
@@ -85,9 +105,13 @@ typedef struct rintls_revocation_endpoints {
 #if defined(__cplusplus)
 static_assert(sizeof(rintls_revocation_endpoints) == 536u,
               "rintls_revocation_endpoints ABI drift");
+static_assert(sizeof(rintls_peer_certificate_binding) == 96u,
+              "rintls_peer_certificate_binding ABI drift");
 #else
 _Static_assert(sizeof(rintls_revocation_endpoints) == 536u,
                "rintls_revocation_endpoints ABI drift");
+_Static_assert(sizeof(rintls_peer_certificate_binding) == 96u,
+               "rintls_peer_certificate_binding ABI drift");
 #endif
 
 /* ═══════════════════════════════════════
@@ -358,6 +382,9 @@ int rintls_get_error(rintls_ctx* ctx);
  * used a hostname, a non-empty trust store, and explicit trusted time. */
 int rintls_get_peer_evidence(rintls_ctx* ctx,
                              rintls_peer_evidence* evidence);
+
+int rintls_get_peer_certificate_binding(
+    rintls_ctx* ctx, rintls_peer_certificate_binding* binding);
 
 /* Copy the DER-encoded leaf certificate retained by a completed handshake.
  * The required size is returned through length even when buffer is NULL or

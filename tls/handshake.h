@@ -208,6 +208,10 @@ typedef struct {
     /* 証明書 */
     u8* server_cert;
     rin_size_t server_cert_len;
+    /* SHA-256 of the first issuer sent after the leaf.  A missing issuer is
+     * kept unavailable instead of guessing from the trust anchor. */
+    u8 server_issuer_sha256[32];
+    int server_issuer_available;
     rsa_pubkey_t server_rsa_key;
     u8 server_ecdsa_key[ECDSA_MAX_POINT_SIZE];
     rin_size_t server_ecdsa_key_len;

@@ -941,6 +941,28 @@ int rintls_get_peer_evidence(rintls_ctx* ctx,
     return RINTLS_OK;
 }
 
+int rintls_get_peer_certificate_binding(
+    rintls_ctx* ctx, rintls_peer_certificate_binding* binding)
+{
+    if (binding != RIN_NULL)
+        rintls_memset(binding, 0, sizeof(*binding));
+    if (!ctx || !binding || !ctx->connected || !ctx->peer_verified ||
+        ctx->handshake.server_cert == RIN_NULL ||
+        ctx->handshake.server_cert_len == 0u ||
+        !ctx->handshake.server_issuer_available)
+        return RINTLS_ERR_CERTIFICATE;
+
+    binding->struct_size = (u32)sizeof(*binding);
+    binding->version = RINTLS_PEER_CERTIFICATE_BINDING_VERSION;
+    binding->binding_flags = RINTLS_PEER_CERTIFICATE_BINDING_REQUIRED;
+    sha256(ctx->handshake.server_cert, ctx->handshake.server_cert_len,
+           binding->leaf_sha256);
+    rintls_memcpy(binding->issuer_sha256,
+                  ctx->handshake.server_issuer_sha256,
+                  sizeof(binding->issuer_sha256));
+    return RINTLS_OK;
+}
+
 int rintls_get_peer_certificate(rintls_ctx* ctx, void* buffer,
                                 rin_size_t capacity, rin_size_t* length)
 {
