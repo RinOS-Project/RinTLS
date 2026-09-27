@@ -17,6 +17,7 @@
 /* 最大サイズ */
 #define X509_MAX_CN_SIZE        256
 #define X509_MAX_SAN_SIZE       256
+#define X509_MAX_REVOCATION_URL_SIZE 256
 #define X509_MAX_CHAIN_DEPTH    10
 /* Maximum hostname scan window including the NUL terminator. */
 #define X509_MAX_HOSTNAME_BYTES 254u
@@ -112,6 +113,13 @@ typedef struct {
     char san[X509_MAX_SAN_SIZE];
     const u8* san_names_data;
     rin_size_t san_names_len;
+
+    /* Revocation endpoints are borrowed from raw_data through parse-time
+     * bounded copies.  Empty strings mean the corresponding extension did
+     * not advertise a URI.  RinTLS does not treat these as proof of status;
+     * a product-owned OCSP/CRL fetcher must authenticate its response. */
+    char ocsp_url[X509_MAX_REVOCATION_URL_SIZE];
+    char crl_url[X509_MAX_REVOCATION_URL_SIZE];
 
     /* 公開鍵 */
     int key_type;

@@ -960,6 +960,36 @@ int rintls_get_peer_certificate(rintls_ctx* ctx, void* buffer,
     return RINTLS_OK;
 }
 
+int rintls_get_peer_revocation_endpoints(
+    rintls_ctx* ctx, rintls_revocation_endpoints* endpoints)
+{
+    x509_cert_t certificate;
+    int result;
+
+    if (endpoints != NULL)
+        rintls_memset(endpoints, 0, sizeof(*endpoints));
+    if (!ctx || !endpoints || !ctx->connected || !ctx->peer_verified ||
+        !ctx->handshake.server_cert || ctx->handshake.server_cert_len == 0u)
+        return RINTLS_ERR_CERTIFICATE;
+
+    rintls_memset(&certificate, 0, sizeof(certificate));
+    result = x509_parse_cert(&certificate, ctx->handshake.server_cert,
+                             ctx->handshake.server_cert_len);
+    if (result != X509_OK) {
+        x509_cert_clear(&certificate);
+        return RINTLS_ERR_CERTIFICATE;
+    }
+
+    endpoints->struct_size = (u32)sizeof(*endpoints);
+    endpoints->version = RINTLS_REVOCATION_ENDPOINTS_VERSION;
+    rintls_memcpy(endpoints->ocsp_url, certificate.ocsp_url,
+                  sizeof(endpoints->ocsp_url));
+    rintls_memcpy(endpoints->crl_url, certificate.crl_url,
+                  sizeof(endpoints->crl_url));
+    x509_cert_clear(&certificate);
+    return RINTLS_OK;
+}
+
 const char* rintls_strerror(int error)
 {
     switch (error) {

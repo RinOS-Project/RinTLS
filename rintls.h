@@ -48,6 +48,8 @@ extern "C" {
 #define RINTLS_PEER_EVIDENCE_HOSTNAME_VERIFIED 0x00000002u
 #define RINTLS_PEER_EVIDENCE_TRUSTED_TIME 0x00000004u
 #define RINTLS_PEER_EVIDENCE_REQUIRED 0x00000007u
+#define RINTLS_REVOCATION_ENDPOINTS_VERSION 0x00010000u
+#define RINTLS_MAX_REVOCATION_URL_BYTES 256u
 
 /* Maximum DNS hostname text length is 253 bytes.  The public C-string
  * boundary scans at most 254 bytes so a 253-byte hostname may still carry
@@ -67,6 +69,26 @@ typedef struct rintls_peer_evidence {
     char peer_dns_name[256];
     u64 reserved[2];
 } rintls_peer_evidence;
+
+/* Revocation locations advertised by the authenticated peer certificate.
+ * These are discovery data only: an endpoint response must still be fetched
+ * by a product-owned transport and validated against the same leaf, issuer,
+ * authorization, and trusted-time policy before it can affect a connection. */
+typedef struct rintls_revocation_endpoints {
+    u32 struct_size;
+    u32 version;
+    char ocsp_url[RINTLS_MAX_REVOCATION_URL_BYTES];
+    char crl_url[RINTLS_MAX_REVOCATION_URL_BYTES];
+    u64 reserved[2];
+} rintls_revocation_endpoints;
+
+#if defined(__cplusplus)
+static_assert(sizeof(rintls_revocation_endpoints) == 536u,
+              "rintls_revocation_endpoints ABI drift");
+#else
+_Static_assert(sizeof(rintls_revocation_endpoints) == 536u,
+               "rintls_revocation_endpoints ABI drift");
+#endif
 
 /* ═══════════════════════════════════════
  * オプションフラグ
@@ -342,6 +364,12 @@ int rintls_get_peer_evidence(rintls_ctx* ctx,
  * too small, so callers can perform a bounded two-pass copy. */
 int rintls_get_peer_certificate(rintls_ctx* ctx, void* buffer,
                                 rin_size_t capacity, rin_size_t* length);
+
+/* Extract the first OCSP AIA and CRL Distribution Point URI from the peer
+ * leaf certificate. The output is valid only for the current connection and
+ * is zeroed on failure; an empty URI means that extension was not advertised. */
+int rintls_get_peer_revocation_endpoints(
+    rintls_ctx* ctx, rintls_revocation_endpoints* endpoints);
 
 /*
  * エラーメッセージを取得

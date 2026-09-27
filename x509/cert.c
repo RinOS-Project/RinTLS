@@ -39,6 +39,13 @@ static const u8 OID_CN[] = {0x55, 0x04, 0x03};  /* commonName */
 /* 拡張OID */
 static const u8 OID_BASIC_CONSTRAINTS[] = {0x55, 0x1D, 0x13};
 static const u8 OID_SUBJECT_ALT_NAME[] = {0x55, 0x1D, 0x11};
+static const u8 OID_CRL_DISTRIBUTION_POINTS[] = {0x55, 0x1D, 0x1F};
+static const u8 OID_AUTHORITY_INFO_ACCESS[] = {
+    0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x01
+};
+static const u8 OID_AD_OCSP[] = {
+    0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01
+};
 
 /* ═══════════════════════════════════════
  * ASN.1パーサー
@@ -359,6 +366,104 @@ static int parse_public_key(x509_cert_t* cert, const u8** p, const u8* end)
  * 拡張をパース
  * ═══════════════════════════════════════ */
 
+static int copy_revocation_uri(char destination[X509_MAX_REVOCATION_URL_SIZE],
+                               const u8* uri, rin_size_t uri_len)
+{
+    rin_size_t index;
+
+    if (destination == NULL || uri == NULL || uri_len == 0u ||
+        uri_len >= X509_MAX_REVOCATION_URL_SIZE || destination[0] != '\0') {
+        return 0;
+    }
+    for (index = 0u; index < uri_len; ++index) {
+        /* GeneralName.uniformResourceIdentifier is IA5String. Reject
+         * controls and NUL so the public C-string boundary cannot truncate
+         * or reinterpret an endpoint. */
+        if (uri[index] < 0x20u || uri[index] > 0x7Eu) return 0;
+    }
+    rintls_memcpy(destination, uri, uri_len);
+    destination[uri_len] = '\0';
+    return 1;
+}
+
+static void scan_revocation_uri(const u8* data, const u8* end,
+                                char destination[X509_MAX_REVOCATION_URL_SIZE],
+                                int depth)
+{
+    const u8* p = data;
+
+    if (data == NULL || end == NULL || data > end || destination == NULL ||
+        destination[0] != '\0' || depth > 5) {
+        return;
+    }
+    while (p < end && destination[0] == '\0') {
+        u8 tag;
+        rin_size_t len;
+        const u8* value;
+        const u8* value_end;
+
+        if (asn1_read_tag(&p, end, &tag, &len) < 0) return;
+        value = p;
+        value_end = p + len;
+        if (tag == 0x86u) {
+            (void)copy_revocation_uri(destination, value, len);
+        } else if (tag == ASN1_SEQUENCE || tag == ASN1_CONTEXT_0 ||
+                   tag == 0xA1u) {
+            scan_revocation_uri(value, value_end, destination, depth + 1);
+        }
+        p = value_end;
+    }
+}
+
+static void parse_ocsp_access_descriptions(
+    x509_cert_t* cert, const u8* value_data, rin_size_t value_len)
+{
+    const u8* p = value_data;
+    const u8* end = value_data + value_len;
+    u8 tag;
+    rin_size_t len;
+
+    if (asn1_read_tag(&p, end, &tag, &len) < 0 || tag != ASN1_SEQUENCE)
+        return;
+    end = p + len;
+    while (p < end && cert->ocsp_url[0] == '\0') {
+        const u8* description_end;
+        const u8* method;
+        rin_size_t method_len;
+        const u8* location;
+        rin_size_t location_len;
+
+        if (asn1_read_tag(&p, end, &tag, &len) < 0 || tag != ASN1_SEQUENCE)
+            return;
+        description_end = p + len;
+        if (asn1_read_tag(&p, description_end, &tag, &method_len) < 0 ||
+            tag != ASN1_OID) {
+            p = description_end;
+            continue;
+        }
+        method = p;
+        if (method_len != sizeof(OID_AD_OCSP) ||
+            rintls_memcmp(method, OID_AD_OCSP, method_len) != 0) {
+            p += method_len;
+            p = description_end;
+            continue;
+        }
+        p += method_len;
+        if (asn1_read_tag(&p, description_end, &tag, &location_len) < 0) {
+            cert->ocsp_url[0] = 'L';
+            p = description_end;
+            continue;
+        }
+        location = p;
+        if (tag == 0x86u) {
+            (void)copy_revocation_uri(cert->ocsp_url, location, location_len);
+        } else {
+            cert->ocsp_url[0] = 'T';
+        }
+        p = description_end;
+    }
+}
+
 static int parse_extensions(x509_cert_t* cert, const u8** p, const u8* end)
 {
     u8 tag;
@@ -391,6 +496,12 @@ static int parse_extensions(x509_cert_t* cert, const u8** p, const u8* end)
                                     rintls_memcmp(*p, OID_BASIC_CONSTRAINTS, len) == 0);
         int is_san = (len == sizeof(OID_SUBJECT_ALT_NAME) &&
                       rintls_memcmp(*p, OID_SUBJECT_ALT_NAME, len) == 0);
+        int is_crl_distribution_points =
+            (len == sizeof(OID_CRL_DISTRIBUTION_POINTS) &&
+             rintls_memcmp(*p, OID_CRL_DISTRIBUTION_POINTS, len) == 0);
+        int is_authority_info_access =
+            (len == sizeof(OID_AUTHORITY_INFO_ACCESS) &&
+             rintls_memcmp(*p, OID_AUTHORITY_INFO_ACCESS, len) == 0);
         *p += len;
 
         /* critical (optional) */
@@ -445,6 +556,11 @@ static int parse_extensions(x509_cert_t* cert, const u8** p, const u8* end)
                     san_p += len;
                 }
             }
+        } else if (is_authority_info_access) {
+            parse_ocsp_access_descriptions(cert, value_data, value_len);
+        } else if (is_crl_distribution_points) {
+            scan_revocation_uri(value_data, value_data + value_len,
+                                cert->crl_url, 0);
         }
 
         *p = single_ext_end;
