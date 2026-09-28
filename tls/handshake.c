@@ -48,6 +48,16 @@ static void write_u24(u8* p, u32 val)
     p[2] = (u8)(val & 0xFF);
 }
 
+/* 32-bit values in the public bounded certificate-chain blob use the
+ * product's little-endian ABI, matching the existing trust-bundle format. */
+static void write_u32_le(u8* p, u32 val)
+{
+    p[0] = (u8)(val & 0xFFu);
+    p[1] = (u8)((val >> 8) & 0xFFu);
+    p[2] = (u8)((val >> 16) & 0xFFu);
+    p[3] = (u8)(val >> 24);
+}
+
 /* 16ビット値をビッグエンディアンから読み取り */
 static u16 read_u16(const u8* p)
 {
@@ -304,6 +314,12 @@ void tls_handshake_clear(tls_handshake_ctx_t* ctx)
     if (ctx->server_issuer_cert) {
         rintls_mem_free(ctx->server_issuer_cert);
         ctx->server_issuer_cert = RIN_NULL;
+    }
+    if (ctx->peer_certificate_chain) {
+        rintls_secure_zero(ctx->peer_certificate_chain,
+                           ctx->peer_certificate_chain_len);
+        rintls_mem_free(ctx->peer_certificate_chain);
+        ctx->peer_certificate_chain = RIN_NULL;
     }
     if (ctx->client_certificate_list) {
         rintls_secure_zero(ctx->client_certificate_list,
@@ -1762,6 +1778,21 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
         rintls_debug("[TLS] Certificate list is empty\n");
         return TLS_HS_ERR_CERTIFICATE;
     }
+    if (cert_list_len > TLS_MAX_PEER_CERTIFICATE_CHAIN_BYTES - 4u) {
+        rintls_debug("[TLS] Peer certificate chain exceeds bounded storage\n");
+        return TLS_HS_ERR_CERTIFICATE;
+    }
+
+    /* The public blob uses a four-byte DER length for each entry while the
+     * TLS Certificate message uses a three-byte length. Allocate the fixed
+     * bounded representation rather than assuming the wire list is large
+     * enough for the expanded headers. */
+    u32 peer_chain_capacity = TLS_MAX_PEER_CERTIFICATE_CHAIN_BYTES;
+    ctx->peer_certificate_chain = rintls_malloc(peer_chain_capacity);
+    if (!ctx->peer_certificate_chain) return TLS_HS_ERR_IO;
+    ctx->peer_certificate_chain_len = 4u;
+    ctx->peer_certificate_chain_count = 0u;
+    write_u32_le(ctx->peer_certificate_chain, 0u);
 
     /* リーフ証明書と直前の証明書だけを保持するピンポンバッファ。
      * チェーンの長さによらずスタック使用量を一定(2枠分)に保つ。 */
@@ -1792,6 +1823,23 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
             p += ext_len;
         }
 
+        if (cert_index >= RINTLS_MAX_CERT_CHAIN ||
+            ctx->peer_certificate_chain_len >
+                peer_chain_capacity - 4u - cert_len) {
+            rintls_debug("[TLS] Peer certificate chain count exceeds limit\n");
+            chain_err = TLS_HS_ERR_CERTIFICATE;
+            break;
+        }
+        write_u32_le(ctx->peer_certificate_chain +
+                         ctx->peer_certificate_chain_len,
+                     cert_len);
+        ctx->peer_certificate_chain_len += 4u;
+        rintls_memcpy(ctx->peer_certificate_chain +
+                          ctx->peer_certificate_chain_len,
+                      cert_der, cert_len);
+        ctx->peer_certificate_chain_len += cert_len;
+        ctx->peer_certificate_chain_count++;
+
         if (cert_index == 0) {
             /* リーフ証明書のDERを保存 (API/デバッグ用) */
             ctx->server_cert = rintls_malloc(cert_len);
@@ -1804,11 +1852,6 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
             /* RINTLS_OPT_VERIFY_NONE: パース/検証をスキップ */
             cert_index++;
             continue;
-        }
-
-        if (cert_index >= RINTLS_MAX_CERT_CHAIN) {
-            /* これ以上のCA証明書は無視 (エラーにはしない) */
-            break;
         }
 
         x509_cert_t* cur = &cert_buf[cert_index & 1];
@@ -1896,6 +1939,9 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
         ctx->state = TLS_STATE_ERROR;
         return chain_err;
     }
+
+    write_u32_le(ctx->peer_certificate_chain,
+                 ctx->peer_certificate_chain_count);
 
     ctx->state = TLS_STATE_CERTIFICATE_RECEIVED;
     return TLS_HS_ERR_OK;

@@ -432,6 +432,14 @@ int rintls_get_peer_certificate_binding(
 int rintls_get_peer_certificate(rintls_ctx* ctx, void* buffer,
                                 rin_size_t capacity, rin_size_t* length);
 
+/* Copy the bounded, authenticated peer certificate chain. The blob starts
+ * with a little-endian u32 count, followed by count little-endian u32 DER
+ * lengths and DER values. Entry zero is the leaf; remaining entries are the
+ * certificates sent by the peer in order. The required size is returned
+ * through length even when buffer is NULL or too small. */
+int rintls_get_peer_certificate_chain(rintls_ctx* ctx, void* buffer,
+                                      rin_size_t capacity, rin_size_t* length);
+
 /* Extract the first OCSP AIA and CRL Distribution Point URI from the peer
  * leaf certificate. The output is valid only for the current connection and
  * is zeroed on failure; an empty URI means that extension was not advertised. */

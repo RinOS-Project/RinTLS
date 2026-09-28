@@ -128,6 +128,8 @@ typedef enum {
 
 #define TLS_MAX_PENDING_HANDSHAKE_SEND  16384
 #define TLS_MAX_PENDING_HANDSHAKE_RECV  16384
+#define TLS_MAX_PEER_CERTIFICATE_CHAIN_BYTES \
+    (4u + RINTLS_MAX_CERT_CHAIN * (4u + RINTLS_MAX_CERT_SIZE))
 #define TLS_MAX_NEGOTIATED_ALPN        32u
 #define TLS_MAX_CLIENT_CERTIFICATE_CHAIN (16u * 1024u)
 #define TLS_MAX_CLIENT_SIGNATURE_BYTES 512u
@@ -208,6 +210,11 @@ typedef struct {
     /* 証明書 */
     u8* server_cert;
     rin_size_t server_cert_len;
+    /* Bounded little-endian count + (DER length + DER) entries for the
+     * authenticated peer certificate_list. The leaf is entry zero. */
+    u8* peer_certificate_chain;
+    rin_size_t peer_certificate_chain_len;
+    u32 peer_certificate_chain_count;
     /* The DER of the immediate issuer is retained only for the product-owned
      * revocation verifier.  Its digest alone is exposed to ordinary callers
      * so an owner cannot silently substitute a trust anchor. */

@@ -581,7 +581,9 @@ static void rintls_mark_connected(rintls_ctx* ctx)
         ctx->trusted_unix_time != 0u &&
         rintls_trust_anchor_count(ctx) != 0u &&
         ctx->handshake.server_cert != RIN_NULL &&
-        ctx->handshake.server_cert_len != 0u;
+        ctx->handshake.server_cert_len != 0u &&
+        ctx->handshake.peer_certificate_chain != RIN_NULL &&
+        ctx->handshake.peer_certificate_chain_len >= 8u;
     ctx->last_error = RINTLS_OK;
 }
 
@@ -979,6 +981,26 @@ int rintls_get_peer_certificate(rintls_ctx* ctx, void* buffer,
         return RINTLS_ERR_MEMORY;
 
     rintls_memcpy(buffer, ctx->handshake.server_cert, required);
+    return RINTLS_OK;
+}
+
+int rintls_get_peer_certificate_chain(rintls_ctx* ctx, void* buffer,
+                                      rin_size_t capacity, rin_size_t* length)
+{
+    rin_size_t required;
+
+    if (length) *length = 0u;
+    if (!ctx || !ctx->connected || !ctx->peer_verified ||
+        !ctx->handshake.peer_certificate_chain ||
+        ctx->handshake.peer_certificate_chain_len < 8u || !length)
+        return RINTLS_ERR_CERTIFICATE;
+
+    required = ctx->handshake.peer_certificate_chain_len;
+    *length = required;
+    if (!buffer || capacity < required)
+        return RINTLS_ERR_MEMORY;
+
+    rintls_memcpy(buffer, ctx->handshake.peer_certificate_chain, required);
     return RINTLS_OK;
 }
 
