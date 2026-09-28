@@ -70,6 +70,290 @@ static u32 read_u24(const u8* p)
     return ((u32)p[0] << 16) | ((u32)p[1] << 8) | p[2];
 }
 
+static int tls_peer_signature_scheme_supported(u16 signature_scheme)
+{
+    switch (signature_scheme) {
+    case TLS_SIG_RSA_PKCS1_SHA256:
+    case TLS_SIG_RSA_PKCS1_SHA384:
+    case TLS_SIG_RSA_PKCS1_SHA512:
+    case TLS_SIG_ECDSA_SECP256R1_SHA256:
+    case TLS_SIG_ECDSA_SECP384R1_SHA384:
+    case TLS_SIG_ECDSA_SECP521R1_SHA512:
+    case TLS_SIG_RSA_PSS_RSAE_SHA256:
+    case TLS_SIG_RSA_PSS_RSAE_SHA384:
+    case TLS_SIG_RSA_PSS_RSAE_SHA512:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Parse a complete ClientHello without consuming the record layer.  Keeping
+ * this separate from the eventual server state machine makes the ownership
+ * boundary testable: malformed input cannot partially replace the previous
+ * selection data, and a parser success is never mistaken for a handshake. */
+int tls_parse_client_hello(tls_handshake_ctx_t* ctx,
+                           const u8* message, rin_size_t message_len)
+{
+    u8 client_random[32];
+    u16 peer_cipher_suites[TLS_MAX_PEER_CIPHER_SUITES];
+    u16 peer_supported_versions[TLS_MAX_PEER_SUPPORTED_VERSIONS];
+    u16 peer_signature_schemes[TLS_MAX_PEER_SIGNATURE_SCHEMES];
+    u8 peer_key_share[65];
+    char server_name[sizeof(ctx->server_name)];
+    u16 peer_cipher_suite_count = 0u;
+    u16 peer_supported_version_count = 0u;
+    u16 peer_signature_scheme_count = 0u;
+    u16 peer_key_share_group = 0u;
+    rin_size_t peer_key_share_len = 0u;
+    int peer_offered_http11 = 0;
+    int saw_supported_versions = 0;
+    int saw_key_share = 0;
+    int saw_signature_algorithms = 0;
+    int saw_server_name = 0;
+    int saw_alpn = 0;
+    int saw_null_compression = 0;
+    u16 legacy_version;
+    const u8* p;
+    const u8* end;
+
+    if (!ctx || !message || message_len < 4u ||
+        message[0] != TLS_HS_CLIENT_HELLO ||
+        read_u24(message + 1u) != message_len - 4u) {
+        return TLS_HS_ERR_UNEXPECTED;
+    }
+
+    rintls_memset(client_random, 0, sizeof(client_random));
+    rintls_memset(peer_cipher_suites, 0, sizeof(peer_cipher_suites));
+    rintls_memset(peer_supported_versions, 0,
+                  sizeof(peer_supported_versions));
+    rintls_memset(peer_signature_schemes, 0,
+                  sizeof(peer_signature_schemes));
+    rintls_memset(peer_key_share, 0, sizeof(peer_key_share));
+    rintls_memset(server_name, 0, sizeof(server_name));
+
+    p = message + 4u;
+    end = message + message_len;
+    if ((size_t)(end - p) < 2u + 32u + 1u) return TLS_HS_ERR_UNEXPECTED;
+    legacy_version = read_u16(p);
+    p += 2u;
+    if (legacy_version < TLS_VERSION_1_2) return TLS_HS_ERR_VERSION;
+    rintls_memcpy(client_random, p, sizeof(client_random));
+    p += sizeof(client_random);
+
+    {
+        u8 session_id_len = *p++;
+        if (session_id_len > 32u || (size_t)(end - p) < session_id_len)
+            return TLS_HS_ERR_UNEXPECTED;
+        p += session_id_len;
+    }
+
+    if ((size_t)(end - p) < 2u) return TLS_HS_ERR_UNEXPECTED;
+    {
+        u16 cipher_suites_len = read_u16(p);
+        p += 2u;
+        if (cipher_suites_len < 2u || (cipher_suites_len & 1u) != 0u ||
+            (size_t)(end - p) < cipher_suites_len ||
+            cipher_suites_len / 2u > TLS_MAX_PEER_CIPHER_SUITES)
+            return TLS_HS_ERR_CIPHER;
+        while (cipher_suites_len != 0u) {
+            u16 suite = read_u16(p);
+            p += 2u;
+            cipher_suites_len = (u16)(cipher_suites_len - 2u);
+            for (u16 index = 0u; index < peer_cipher_suite_count; ++index) {
+                if (peer_cipher_suites[index] == suite)
+                    return TLS_HS_ERR_CIPHER;
+            }
+            peer_cipher_suites[peer_cipher_suite_count++] = suite;
+        }
+    }
+
+    if ((size_t)(end - p) < 1u) return TLS_HS_ERR_UNEXPECTED;
+    {
+        u8 compression_methods_len = *p++;
+        if (compression_methods_len == 0u ||
+            (size_t)(end - p) < compression_methods_len)
+            return TLS_HS_ERR_UNEXPECTED;
+        for (u8 index = 0u; index < compression_methods_len; ++index) {
+            if (p[index] == 0u) saw_null_compression = 1;
+        }
+        p += compression_methods_len;
+    }
+    if (!saw_null_compression) return TLS_HS_ERR_UNEXPECTED;
+
+    if ((size_t)(end - p) == 0u) {
+        /* A TLS 1.2 ClientHello may omit extensions. */
+        goto commit;
+    }
+    if ((size_t)(end - p) < 2u) return TLS_HS_ERR_UNEXPECTED;
+    {
+        u16 extensions_len = read_u16(p);
+        const u8* extensions_end;
+        p += 2u;
+        if ((size_t)(end - p) != extensions_len) return TLS_HS_ERR_UNEXPECTED;
+        extensions_end = p + extensions_len;
+        while (p < extensions_end) {
+            u16 extension_type;
+            u16 extension_len;
+            const u8* extension_end;
+            if ((size_t)(extensions_end - p) < 4u)
+                return TLS_HS_ERR_UNEXPECTED;
+            extension_type = read_u16(p);
+            extension_len = read_u16(p + 2u);
+            p += 4u;
+            if ((size_t)(extensions_end - p) < extension_len)
+                return TLS_HS_ERR_UNEXPECTED;
+            extension_end = p + extension_len;
+
+            if (extension_type == TLS_EXT_SUPPORTED_VERSIONS) {
+                u8 versions_len;
+                if (saw_supported_versions || extension_len < 3u)
+                    return TLS_HS_ERR_UNEXPECTED;
+                versions_len = p[0];
+                if ((versions_len & 1u) != 0u ||
+                    versions_len == 0u ||
+                    (u32)versions_len + 1u != extension_len ||
+                    versions_len / 2u > TLS_MAX_PEER_SUPPORTED_VERSIONS)
+                    return TLS_HS_ERR_VERSION;
+                for (u16 offset = 0u; offset < versions_len; offset += 2u)
+                    peer_supported_versions[peer_supported_version_count++] =
+                        read_u16(p + 1u + offset);
+                saw_supported_versions = 1;
+            } else if (extension_type == TLS_EXT_SERVER_NAME) {
+                u16 names_len;
+                const u8* name_p;
+                if (saw_server_name || extension_len < 5u)
+                    return TLS_HS_ERR_UNEXPECTED;
+                names_len = read_u16(p);
+                if ((u32)names_len + 2u != extension_len) {
+                    return TLS_HS_ERR_UNEXPECTED;
+                }
+                name_p = p + 2u;
+                while (name_p < extension_end) {
+                    u8 name_type;
+                    u16 name_len;
+                    if ((size_t)(extension_end - name_p) < 3u)
+                        return TLS_HS_ERR_UNEXPECTED;
+                    name_type = name_p[0];
+                    name_len = read_u16(name_p + 1u);
+                    name_p += 3u;
+                    if ((size_t)(extension_end - name_p) < name_len)
+                        return TLS_HS_ERR_UNEXPECTED;
+                    if (name_type == 0u && server_name[0] == '\0') {
+                        if (name_len == 0u ||
+                            name_len >= sizeof(server_name))
+                            return TLS_HS_ERR_HOSTNAME;
+                        for (u16 index = 0u; index < name_len; ++index) {
+                            if (name_p[index] == '\0')
+                                return TLS_HS_ERR_HOSTNAME;
+                            server_name[index] = (char)name_p[index];
+                        }
+                        server_name[name_len] = '\0';
+                    }
+                    name_p += name_len;
+                }
+                if (name_p != extension_end) return TLS_HS_ERR_UNEXPECTED;
+                saw_server_name = 1;
+            } else if (extension_type == TLS_EXT_ALPN) {
+                u16 protocols_len;
+                const u8* protocol_p;
+                if (saw_alpn || extension_len < 3u)
+                    return TLS_HS_ERR_UNEXPECTED;
+                protocols_len = read_u16(p);
+                if ((u32)protocols_len + 2u != extension_len)
+                    return TLS_HS_ERR_UNEXPECTED;
+                protocol_p = p + 2u;
+                while (protocol_p < extension_end) {
+                    u8 protocol_len = *protocol_p++;
+                    if (protocol_len == 0u ||
+                        (size_t)(extension_end - protocol_p) < protocol_len)
+                        return TLS_HS_ERR_UNEXPECTED;
+                    if (protocol_len == 8u &&
+                        rintls_memcmp(protocol_p, "http/1.1", 8u) == 0)
+                        peer_offered_http11 = 1;
+                    protocol_p += protocol_len;
+                }
+                if (protocol_p != extension_end) return TLS_HS_ERR_UNEXPECTED;
+                saw_alpn = 1;
+            } else if (extension_type == TLS_EXT_SIGNATURE_ALGORITHMS) {
+                u16 schemes_len;
+                if (saw_signature_algorithms || extension_len < 4u)
+                    return TLS_HS_ERR_UNEXPECTED;
+                schemes_len = read_u16(p);
+                if ((schemes_len & 1u) != 0u || schemes_len == 0u ||
+                    (u32)schemes_len + 2u != extension_len ||
+                    schemes_len / 2u > TLS_MAX_PEER_SIGNATURE_SCHEMES)
+                    return TLS_HS_ERR_SIGNATURE;
+                for (u16 offset = 0u; offset < schemes_len; offset += 2u) {
+                    u16 scheme = read_u16(p + 2u + offset);
+                    if (!tls_peer_signature_scheme_supported(scheme))
+                        continue;
+                    for (u16 index = 0u; index < peer_signature_scheme_count;
+                         ++index) {
+                        if (peer_signature_schemes[index] == scheme)
+                            return TLS_HS_ERR_SIGNATURE;
+                    }
+                    peer_signature_schemes[peer_signature_scheme_count++] =
+                        scheme;
+                }
+                saw_signature_algorithms = 1;
+            } else if (extension_type == TLS_EXT_KEY_SHARE) {
+                u16 shares_len;
+                const u8* share_p;
+                if (saw_key_share || extension_len < 4u)
+                    return TLS_HS_ERR_UNEXPECTED;
+                shares_len = read_u16(p);
+                if ((u32)shares_len + 2u != extension_len)
+                    return TLS_HS_ERR_UNEXPECTED;
+                share_p = p + 2u;
+                while (share_p < extension_end) {
+                    u16 group;
+                    u16 key_len;
+                    if ((size_t)(extension_end - share_p) < 4u)
+                        return TLS_HS_ERR_UNEXPECTED;
+                    group = read_u16(share_p);
+                    key_len = read_u16(share_p + 2u);
+                    share_p += 4u;
+                    if ((size_t)(extension_end - share_p) < key_len)
+                        return TLS_HS_ERR_KEY_EXCHANGE;
+                    if (peer_key_share_group == 0u &&
+                        ((group == TLS_GROUP_X25519 && key_len == 32u) ||
+                         (group == TLS_GROUP_SECP256R1 && key_len == 65u))) {
+                        peer_key_share_group = group;
+                        peer_key_share_len = key_len;
+                        rintls_memcpy(peer_key_share, share_p, key_len);
+                    }
+                    share_p += key_len;
+                }
+                if (share_p != extension_end) return TLS_HS_ERR_UNEXPECTED;
+                saw_key_share = 1;
+            }
+
+            p = extension_end;
+        }
+    }
+
+commit:
+    rintls_memcpy(ctx->client_random, client_random, sizeof(client_random));
+    rintls_memcpy(ctx->peer_cipher_suites, peer_cipher_suites,
+                  sizeof(peer_cipher_suites));
+    ctx->peer_cipher_suite_count = peer_cipher_suite_count;
+    rintls_memcpy(ctx->peer_supported_versions, peer_supported_versions,
+                  sizeof(peer_supported_versions));
+    ctx->peer_supported_version_count = peer_supported_version_count;
+    rintls_memcpy(ctx->peer_signature_schemes, peer_signature_schemes,
+                  sizeof(peer_signature_schemes));
+    ctx->peer_signature_scheme_count = peer_signature_scheme_count;
+    ctx->peer_key_share_group = peer_key_share_group;
+    ctx->peer_key_share_len = peer_key_share_len;
+    rintls_memcpy(ctx->peer_key_share, peer_key_share, sizeof(peer_key_share));
+    rintls_memset(ctx->server_name, 0, sizeof(ctx->server_name));
+    rintls_memcpy(ctx->server_name, server_name, sizeof(server_name));
+    ctx->peer_offered_http11 = peer_offered_http11;
+    ctx->client_hello_received = 1;
+    return TLS_HS_ERR_OK;
+}
+
 /* The product ClientHello advertises only HTTP/1.1.  A server ALPN
  * response is a single protocol name, so validate that response at the
  * handshake boundary instead of allowing an unimplemented protocol to be

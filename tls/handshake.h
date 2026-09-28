@@ -139,6 +139,9 @@ typedef enum {
     (2u + TLS_MAX_CLIENT_SIGNATURE_SCHEMES * 2u)
 #define TLS_MAX_CLIENT_CERTIFICATE_AUTHORITIES_BYTES 4098u
 #define TLS_MAX_CLIENT_CIPHER_SUITES 8u
+#define TLS_MAX_PEER_CIPHER_SUITES 32u
+#define TLS_MAX_PEER_SUPPORTED_VERSIONS 8u
+#define TLS_MAX_PEER_SIGNATURE_SCHEMES 64u
 
 typedef int (*tls_trust_anchor_verify_func)(void* opaque,
                                             const x509_cert_t* chain_top);
@@ -171,6 +174,20 @@ typedef struct {
     u16 cipher_suite;
     u16 client_cipher_suites[TLS_MAX_CLIENT_CIPHER_SUITES];
     u16 client_cipher_suite_count;
+    /* Server-side ClientHello selection input.  These fields are populated
+     * only by tls_parse_client_hello(); no server handshake is implied by
+     * parsing alone. */
+    u16 peer_cipher_suites[TLS_MAX_PEER_CIPHER_SUITES];
+    u16 peer_cipher_suite_count;
+    u16 peer_supported_versions[TLS_MAX_PEER_SUPPORTED_VERSIONS];
+    u16 peer_supported_version_count;
+    u16 peer_signature_schemes[TLS_MAX_PEER_SIGNATURE_SCHEMES];
+    u16 peer_signature_scheme_count;
+    u16 peer_key_share_group;
+    u8 peer_key_share[65];
+    rin_size_t peer_key_share_len;
+    int peer_offered_http11;
+    int client_hello_received;
     u16 named_group;
     u8 negotiated_alpn[TLS_MAX_NEGOTIATED_ALPN];
     u8 negotiated_alpn_len;
@@ -336,6 +353,13 @@ int tls_handshake_get_client_certificate_request(
  * 戻り値: 成功時 TLS_ERR_OK、エラー時 < 0
  */
 int tls_handshake_client(tls_handshake_ctx_t* ctx);
+
+/* Parse one complete ClientHello for a future server state machine.  This
+ * function has no I/O side effects and does not advance the handshake state;
+ * it commits the parsed selection inputs only after the complete message has
+ * passed all bounds and extension checks. */
+int tls_parse_client_hello(tls_handshake_ctx_t* ctx,
+                           const u8* message, rin_size_t message_len);
 
 /* ═══════════════════════════════════════
  * 個別メッセージ処理 (内部用)
