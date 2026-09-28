@@ -1004,21 +1004,109 @@ int rintls_get_peer_certificate_chain(rintls_ctx* ctx, void* buffer,
     return RINTLS_OK;
 }
 
-int rintls_get_peer_revocation_endpoints(
-    rintls_ctx* ctx, rintls_revocation_endpoints* endpoints)
+static u32 rintls_read_u32_le(const u8* data)
 {
+    return (u32)data[0] |
+           ((u32)data[1] << 8) |
+           ((u32)data[2] << 16) |
+           ((u32)data[3] << 24);
+}
+
+static int rintls_peer_certificate_at(rintls_ctx* ctx,
+                                       u32 certificate_index,
+                                       const u8** der,
+                                       rin_size_t* der_len)
+{
+    const u8* blob;
+    rin_size_t offset;
+    rin_size_t remaining;
+    u32 count;
+    u32 stored_count;
+    u32 index;
+
+    if (der) *der = RIN_NULL;
+    if (der_len) *der_len = 0u;
+    if (!ctx || !der || !der_len || !ctx->connected || !ctx->peer_verified ||
+        !ctx->handshake.peer_certificate_chain ||
+        ctx->handshake.peer_certificate_chain_len < 8u)
+        return RINTLS_ERR_CERTIFICATE;
+
+    blob = ctx->handshake.peer_certificate_chain;
+    remaining = ctx->handshake.peer_certificate_chain_len;
+    if (remaining < 4u) return RINTLS_ERR_CERTIFICATE;
+    count = rintls_read_u32_le(blob);
+    stored_count = ctx->handshake.peer_certificate_chain_count;
+    if (count == 0u || count != stored_count) return RINTLS_ERR_CERTIFICATE;
+
+    offset = 4u;
+    for (index = 0u; index < count; ++index) {
+        u32 certificate_len;
+
+        if (remaining - offset < 4u) return RINTLS_ERR_CERTIFICATE;
+        certificate_len = rintls_read_u32_le(blob + offset);
+        offset += 4u;
+        if (certificate_len == 0u || certificate_len > RINTLS_MAX_CERT_SIZE ||
+            certificate_len > remaining - offset)
+            return RINTLS_ERR_CERTIFICATE;
+        if (index == certificate_index) {
+            *der = blob + offset;
+            *der_len = (rin_size_t)certificate_len;
+        }
+        offset += (rin_size_t)certificate_len;
+    }
+    if (offset != remaining || *der == RIN_NULL || *der_len == 0u)
+        return RINTLS_ERR_CERTIFICATE;
+    return RINTLS_OK;
+}
+
+static int rintls_parse_peer_revocation_pair(rintls_ctx* ctx,
+                                             u32 certificate_index,
+                                             x509_cert_t* leaf,
+                                             x509_cert_t* issuer)
+{
+    const u8* leaf_der;
+    const u8* issuer_der;
+    rin_size_t leaf_len;
+    rin_size_t issuer_len;
+    int result;
+
+    if (!leaf || !issuer || certificate_index == ~(u32)0)
+        return RINTLS_ERR_CERTIFICATE;
+    result = rintls_peer_certificate_at(ctx, certificate_index,
+                                         &leaf_der, &leaf_len);
+    if (result != RINTLS_OK) return result;
+    result = rintls_peer_certificate_at(ctx, certificate_index + 1u,
+                                         &issuer_der, &issuer_len);
+    if (result != RINTLS_OK) return result;
+    result = x509_parse_cert(leaf, leaf_der, leaf_len);
+    if (result != X509_OK) return RINTLS_ERR_CERTIFICATE;
+    result = x509_parse_cert(issuer, issuer_der, issuer_len);
+    if (result != X509_OK) {
+        x509_cert_clear(leaf);
+        return RINTLS_ERR_CERTIFICATE;
+    }
+    return RINTLS_OK;
+}
+
+int rintls_get_peer_revocation_endpoints_at(
+    rintls_ctx* ctx, u32 certificate_index,
+    rintls_revocation_endpoints* endpoints)
+{
+    const u8* der;
+    rin_size_t der_len;
     x509_cert_t certificate;
     int result;
 
     if (endpoints != NULL)
         rintls_memset(endpoints, 0, sizeof(*endpoints));
-    if (!ctx || !endpoints || !ctx->connected || !ctx->peer_verified ||
-        !ctx->handshake.server_cert || ctx->handshake.server_cert_len == 0u)
+    if (!ctx || !endpoints)
         return RINTLS_ERR_CERTIFICATE;
 
     rintls_memset(&certificate, 0, sizeof(certificate));
-    result = x509_parse_cert(&certificate, ctx->handshake.server_cert,
-                             ctx->handshake.server_cert_len);
+    result = rintls_peer_certificate_at(ctx, certificate_index,
+                                        &der, &der_len);
+    if (result != RINTLS_OK) return result;
+    result = x509_parse_cert(&certificate, der, der_len);
     if (result != X509_OK) {
         x509_cert_clear(&certificate);
         return RINTLS_ERR_CERTIFICATE;
@@ -1034,9 +1122,16 @@ int rintls_get_peer_revocation_endpoints(
     return RINTLS_OK;
 }
 
-int rintls_verify_peer_crl(rintls_ctx* ctx, const void* crl,
-                           rin_size_t crl_len, u64 sequence,
-                           rintls_revocation_evidence* evidence)
+int rintls_get_peer_revocation_endpoints(
+    rintls_ctx* ctx, rintls_revocation_endpoints* endpoints)
+{
+    return rintls_get_peer_revocation_endpoints_at(ctx, 0u, endpoints);
+}
+
+int rintls_verify_peer_crl_at(rintls_ctx* ctx, u32 certificate_index,
+                              const void* crl, rin_size_t crl_len,
+                              u64 sequence,
+                              rintls_revocation_evidence* evidence)
 {
     x509_cert_t leaf;
     x509_cert_t issuer;
@@ -1049,21 +1144,14 @@ int rintls_verify_peer_crl(rintls_ctx* ctx, const void* crl,
         rintls_memset(evidence, 0, sizeof(*evidence));
     if (!ctx || !crl || crl_len == 0u || crl_len > RINTLS_MAX_CRL_SIZE ||
         sequence == 0u || !evidence ||
-        !ctx->connected || !ctx->peer_verified ||
-        !ctx->handshake.server_cert || ctx->handshake.server_cert_len == 0u ||
-        !ctx->handshake.server_issuer_cert ||
-        ctx->handshake.server_issuer_cert_len == 0u ||
-        !ctx->handshake.server_issuer_available)
+        !ctx->connected || !ctx->peer_verified)
         return RINTLS_ERR_CERTIFICATE;
 
     rintls_memset(&leaf, 0, sizeof(leaf));
     rintls_memset(&issuer, 0, sizeof(issuer));
     rintls_memset(&result, 0, sizeof(result));
-    parse_result = x509_parse_cert(&leaf, ctx->handshake.server_cert,
-                                   ctx->handshake.server_cert_len);
-    if (parse_result != X509_OK) goto failed;
-    parse_result = x509_parse_cert(&issuer, ctx->handshake.server_issuer_cert,
-                                   ctx->handshake.server_issuer_cert_len);
+    parse_result = rintls_parse_peer_revocation_pair(ctx, certificate_index,
+                                                     &leaf, &issuer);
     if (parse_result != X509_OK) goto failed;
     parse_result = x509_verify_crl((const u8*)crl, crl_len, &leaf, &issuer,
                                    &result);
@@ -1085,11 +1173,9 @@ int rintls_verify_peer_crl(rintls_ctx* ctx, const void* crl,
     evidence->this_update_unix_time = this_update;
     evidence->next_update_unix_time = next_update;
     evidence->produced_at_unix_time = this_update;
-    sha256(ctx->handshake.server_cert, ctx->handshake.server_cert_len,
+    sha256(leaf.raw_data, leaf.raw_len,
            evidence->certificate_sha256);
-    rintls_memcpy(evidence->issuer_sha256,
-                  ctx->handshake.server_issuer_sha256,
-                  sizeof(evidence->issuer_sha256));
+    sha256(issuer.raw_data, issuer.raw_len, evidence->issuer_sha256);
     evidence->sequence = sequence;
     x509_cert_clear(&issuer);
     x509_cert_clear(&leaf);
@@ -1102,9 +1188,18 @@ failed:
     return RINTLS_ERR_CERTIFICATE;
 }
 
-int rintls_verify_peer_ocsp(rintls_ctx* ctx, const void* response,
-                            rin_size_t response_len, u64 sequence,
-                            rintls_revocation_evidence* evidence)
+int rintls_verify_peer_crl(rintls_ctx* ctx, const void* crl,
+                           rin_size_t crl_len, u64 sequence,
+                           rintls_revocation_evidence* evidence)
+{
+    return rintls_verify_peer_crl_at(ctx, 0u, crl, crl_len, sequence,
+                                     evidence);
+}
+
+int rintls_verify_peer_ocsp_at(rintls_ctx* ctx, u32 certificate_index,
+                               const void* response, rin_size_t response_len,
+                               u64 sequence,
+                               rintls_revocation_evidence* evidence)
 {
     x509_cert_t leaf;
     x509_cert_t issuer;
@@ -1118,21 +1213,14 @@ int rintls_verify_peer_ocsp(rintls_ctx* ctx, const void* response,
         rintls_memset(evidence, 0, sizeof(*evidence));
     if (!ctx || !response || response_len == 0u ||
         response_len > RINTLS_MAX_OCSP_SIZE || sequence == 0u ||
-        !evidence || !ctx->connected || !ctx->peer_verified ||
-        !ctx->handshake.server_cert || ctx->handshake.server_cert_len == 0u ||
-        !ctx->handshake.server_issuer_cert ||
-        ctx->handshake.server_issuer_cert_len == 0u ||
-        !ctx->handshake.server_issuer_available)
+        !evidence || !ctx->connected || !ctx->peer_verified)
         return RINTLS_ERR_CERTIFICATE;
 
     rintls_memset(&leaf, 0, sizeof(leaf));
     rintls_memset(&issuer, 0, sizeof(issuer));
     rintls_memset(&result, 0, sizeof(result));
-    parse_result = x509_parse_cert(&leaf, ctx->handshake.server_cert,
-                                   ctx->handshake.server_cert_len);
-    if (parse_result != X509_OK) goto failed;
-    parse_result = x509_parse_cert(&issuer, ctx->handshake.server_issuer_cert,
-                                   ctx->handshake.server_issuer_cert_len);
+    parse_result = rintls_parse_peer_revocation_pair(ctx, certificate_index,
+                                                     &leaf, &issuer);
     if (parse_result != X509_OK) goto failed;
     parse_result = x509_verify_ocsp((const u8*)response, response_len,
                                     &leaf, &issuer, &result);
@@ -1160,11 +1248,9 @@ int rintls_verify_peer_ocsp(rintls_ctx* ctx, const void* response,
     evidence->this_update_unix_time = this_update;
     evidence->next_update_unix_time = next_update;
     evidence->produced_at_unix_time = produced_at;
-    sha256(ctx->handshake.server_cert, ctx->handshake.server_cert_len,
+    sha256(leaf.raw_data, leaf.raw_len,
            evidence->certificate_sha256);
-    rintls_memcpy(evidence->issuer_sha256,
-                  ctx->handshake.server_issuer_sha256,
-                  sizeof(evidence->issuer_sha256));
+    sha256(issuer.raw_data, issuer.raw_len, evidence->issuer_sha256);
     evidence->sequence = sequence;
     x509_cert_clear(&issuer);
     x509_cert_clear(&leaf);
@@ -1175,6 +1261,14 @@ failed:
     x509_cert_clear(&leaf);
     rintls_memset(evidence, 0, sizeof(*evidence));
     return RINTLS_ERR_CERTIFICATE;
+}
+
+int rintls_verify_peer_ocsp(rintls_ctx* ctx, const void* response,
+                            rin_size_t response_len, u64 sequence,
+                            rintls_revocation_evidence* evidence)
+{
+    return rintls_verify_peer_ocsp_at(ctx, 0u, response, response_len,
+                                      sequence, evidence);
 }
 
 const char* rintls_strerror(int error)

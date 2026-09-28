@@ -446,6 +446,13 @@ int rintls_get_peer_certificate_chain(rintls_ctx* ctx, void* buffer,
 int rintls_get_peer_revocation_endpoints(
     rintls_ctx* ctx, rintls_revocation_endpoints* endpoints);
 
+/* Extract revocation endpoints from a certificate in the authenticated peer
+ * chain.  Index zero is the leaf and the remaining entries are sent by the
+ * peer in certificate-list order. */
+int rintls_get_peer_revocation_endpoints_at(
+    rintls_ctx* ctx, u32 certificate_index,
+    rintls_revocation_endpoints* endpoints);
+
 /* Validate a fetched DER CRL against the authenticated peer leaf and the
  * immediate issuer sent in the same TLS Certificate message.  `sequence`
  * must be supplied by the owner that controls its bounded evidence/cache
@@ -454,6 +461,12 @@ int rintls_verify_peer_crl(rintls_ctx* ctx, const void* crl,
                            rin_size_t crl_len, u64 sequence,
                            rintls_revocation_evidence* evidence);
 
+/* The indexed form validates the certificate at `certificate_index` against
+ * its immediate issuer in the same peer certificate list. */
+int rintls_verify_peer_crl_at(
+    rintls_ctx* ctx, u32 certificate_index, const void* crl,
+    rin_size_t crl_len, u64 sequence, rintls_revocation_evidence* evidence);
+
 /* Validate a fetched DER OCSPResponse against the authenticated peer leaf
  * and the immediate issuer sent in the same TLS Certificate message.
  * `sequence` is supplied by the bounded evidence owner; no network I/O
@@ -461,6 +474,12 @@ int rintls_verify_peer_crl(rintls_ctx* ctx, const void* crl,
 int rintls_verify_peer_ocsp(rintls_ctx* ctx, const void* response,
                             rin_size_t response_len, u64 sequence,
                             rintls_revocation_evidence* evidence);
+
+/* The indexed form validates the certificate at `certificate_index` against
+ * its immediate issuer in the same peer certificate list. */
+int rintls_verify_peer_ocsp_at(
+    rintls_ctx* ctx, u32 certificate_index, const void* response,
+    rin_size_t response_len, u64 sequence, rintls_revocation_evidence* evidence);
 
 /*
  * エラーメッセージを取得
