@@ -1128,6 +1128,131 @@ int rintls_get_peer_revocation_endpoints(
     return rintls_get_peer_revocation_endpoints_at(ctx, 0u, endpoints);
 }
 
+int rintls_get_certificate_revocation_endpoints(
+    const void* certificate_der, rin_size_t certificate_len,
+    rintls_revocation_endpoints* endpoints)
+{
+    x509_cert_t certificate;
+    int result;
+
+    if (endpoints != RIN_NULL)
+        rintls_memset(endpoints, 0, sizeof(*endpoints));
+    if (!certificate_der || certificate_len == 0u ||
+        certificate_len > RINTLS_MAX_CERT_SIZE || !endpoints)
+        return RINTLS_ERR_CERTIFICATE;
+
+    rintls_memset(&certificate, 0, sizeof(certificate));
+    result = x509_parse_cert(&certificate, (const u8*)certificate_der,
+                             certificate_len);
+    if (result != X509_OK) {
+        x509_cert_clear(&certificate);
+        return RINTLS_ERR_CERTIFICATE;
+    }
+
+    endpoints->struct_size = (u32)sizeof(*endpoints);
+    endpoints->version = RINTLS_REVOCATION_ENDPOINTS_VERSION;
+    rintls_memcpy(endpoints->ocsp_url, certificate.ocsp_url,
+                  sizeof(endpoints->ocsp_url));
+    rintls_memcpy(endpoints->crl_url, certificate.crl_url,
+                  sizeof(endpoints->crl_url));
+    x509_cert_clear(&certificate);
+    return RINTLS_OK;
+}
+
+static int rintls_parse_certificate_pair(
+    const void* certificate_der, rin_size_t certificate_len,
+    const void* issuer_der, rin_size_t issuer_len,
+    x509_cert_t* certificate, x509_cert_t* issuer)
+{
+    if (!certificate || !issuer || !certificate_der || !issuer_der ||
+        certificate_len == 0u || issuer_len == 0u ||
+        certificate_len > RINTLS_MAX_CERT_SIZE ||
+        issuer_len > RINTLS_MAX_CERT_SIZE)
+        return RINTLS_ERR_CERTIFICATE;
+
+    rintls_memset(certificate, 0, sizeof(*certificate));
+    rintls_memset(issuer, 0, sizeof(*issuer));
+    if (x509_parse_cert(certificate, (const u8*)certificate_der,
+                        certificate_len) != X509_OK ||
+        x509_parse_cert(issuer, (const u8*)issuer_der, issuer_len) != X509_OK ||
+        !issuer->is_ca || !certificate->issuer_name ||
+        certificate->issuer_name_len != issuer->subject_name_len ||
+        rintls_memcmp(certificate->issuer_name, issuer->subject_name,
+                      certificate->issuer_name_len) != 0 ||
+        x509_verify_signature(certificate, issuer) != X509_OK) {
+        x509_cert_clear(issuer);
+        x509_cert_clear(certificate);
+        return RINTLS_ERR_CERTIFICATE;
+    }
+    return RINTLS_OK;
+}
+
+static void rintls_fill_revocation_evidence(
+    rintls_revocation_evidence* evidence, u32 status, u32 source,
+    const x509_cert_t* certificate, const x509_cert_t* issuer,
+    u64 this_update, u64 next_update, u64 produced_at, u64 sequence)
+{
+    rintls_memset(evidence, 0, sizeof(*evidence));
+    evidence->struct_size = (u32)sizeof(*evidence);
+    evidence->version = RINTLS_REVOCATION_EVIDENCE_VERSION;
+    evidence->status = status;
+    evidence->source = source;
+    evidence->evidence_flags = RINTLS_REVOCATION_EVIDENCE_REQUIRED;
+    evidence->this_update_unix_time = this_update;
+    evidence->next_update_unix_time = next_update;
+    evidence->produced_at_unix_time = produced_at;
+    sha256(certificate->raw_data, certificate->raw_len,
+           evidence->certificate_sha256);
+    sha256(issuer->raw_data, issuer->raw_len, evidence->issuer_sha256);
+    evidence->sequence = sequence;
+}
+
+int rintls_verify_certificate_crl(
+    const void* certificate_der, rin_size_t certificate_len,
+    const void* issuer_der, rin_size_t issuer_len,
+    const void* crl, rin_size_t crl_len, u64 trusted_unix_time,
+    u64 sequence, rintls_revocation_evidence* evidence)
+{
+    x509_cert_t certificate;
+    x509_cert_t issuer;
+    x509_crl_result_t result;
+    u64 this_update;
+    u64 next_update;
+
+    if (evidence != RIN_NULL)
+        rintls_memset(evidence, 0, sizeof(*evidence));
+    if (!crl || crl_len == 0u || crl_len > RINTLS_MAX_CRL_SIZE ||
+        trusted_unix_time == 0u || sequence == 0u || !evidence)
+        return RINTLS_ERR_CERTIFICATE;
+
+    if (rintls_parse_certificate_pair(certificate_der, certificate_len,
+                                      issuer_der, issuer_len,
+                                      &certificate, &issuer) != RINTLS_OK)
+        return RINTLS_ERR_CERTIFICATE;
+
+    rintls_memset(&result, 0, sizeof(result));
+    if (x509_verify_crl((const u8*)crl, crl_len, &certificate, &issuer,
+                        &result) != X509_OK ||
+        !x509_time_to_unix(&result.this_update, &this_update) ||
+        !x509_time_to_unix(&result.next_update, &next_update) ||
+        trusted_unix_time < this_update || trusted_unix_time > next_update) {
+        x509_cert_clear(&issuer);
+        x509_cert_clear(&certificate);
+        return RINTLS_ERR_CERTIFICATE;
+    }
+
+    rintls_fill_revocation_evidence(
+        evidence,
+        result.status == X509_REVOCATION_REVOKED
+            ? RINTLS_REVOCATION_STATUS_REVOKED
+            : RINTLS_REVOCATION_STATUS_GOOD,
+        RINTLS_REVOCATION_SOURCE_CRL, &certificate, &issuer,
+        this_update, next_update, this_update, sequence);
+    x509_cert_clear(&issuer);
+    x509_cert_clear(&certificate);
+    return RINTLS_OK;
+}
+
 int rintls_verify_peer_crl_at(rintls_ctx* ctx, u32 certificate_index,
                               const void* crl, rin_size_t crl_len,
                               u64 sequence,
@@ -1269,6 +1394,59 @@ int rintls_verify_peer_ocsp(rintls_ctx* ctx, const void* response,
 {
     return rintls_verify_peer_ocsp_at(ctx, 0u, response, response_len,
                                       sequence, evidence);
+}
+
+int rintls_verify_certificate_ocsp(
+    const void* certificate_der, rin_size_t certificate_len,
+    const void* issuer_der, rin_size_t issuer_len,
+    const void* response, rin_size_t response_len, u64 trusted_unix_time,
+    u64 sequence, rintls_revocation_evidence* evidence)
+{
+    x509_cert_t certificate;
+    x509_cert_t issuer;
+    x509_ocsp_result_t result;
+    u64 this_update;
+    u64 next_update;
+    u64 produced_at;
+
+    if (evidence != RIN_NULL)
+        rintls_memset(evidence, 0, sizeof(*evidence));
+    if (!response || response_len == 0u ||
+        response_len > RINTLS_MAX_OCSP_SIZE || trusted_unix_time == 0u ||
+        sequence == 0u || !evidence)
+        return RINTLS_ERR_CERTIFICATE;
+
+    if (rintls_parse_certificate_pair(certificate_der, certificate_len,
+                                      issuer_der, issuer_len,
+                                      &certificate, &issuer) != RINTLS_OK)
+        return RINTLS_ERR_CERTIFICATE;
+
+    rintls_memset(&result, 0, sizeof(result));
+    if (x509_verify_ocsp((const u8*)response, response_len, &certificate,
+                         &issuer, &result) != X509_OK ||
+        !x509_time_to_unix(&result.this_update, &this_update) ||
+        !x509_time_to_unix(&result.next_update, &next_update) ||
+        !x509_time_to_unix(&result.produced_at, &produced_at) ||
+        produced_at < this_update || produced_at > next_update ||
+        trusted_unix_time < this_update ||
+        trusted_unix_time < produced_at || trusted_unix_time > next_update ||
+        (result.status != X509_REVOCATION_GOOD &&
+         result.status != X509_REVOCATION_REVOKED)) {
+        x509_cert_clear(&issuer);
+        x509_cert_clear(&certificate);
+        return RINTLS_ERR_CERTIFICATE;
+    }
+
+    rintls_fill_revocation_evidence(
+        evidence,
+        result.status == X509_REVOCATION_REVOKED
+            ? RINTLS_REVOCATION_STATUS_REVOKED
+            : RINTLS_REVOCATION_STATUS_GOOD,
+        RINTLS_REVOCATION_SOURCE_OCSP, &certificate, &issuer,
+        this_update, next_update, produced_at, sequence);
+    x509_cert_clear(&issuer);
+    x509_cert_clear(&certificate);
+    return RINTLS_OK;
 }
 
 const char* rintls_strerror(int error)

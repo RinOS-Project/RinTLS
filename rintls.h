@@ -453,6 +453,14 @@ int rintls_get_peer_revocation_endpoints_at(
     rintls_ctx* ctx, u32 certificate_index,
     rintls_revocation_endpoints* endpoints);
 
+/* Extract revocation endpoints from a caller-owned DER certificate.  This
+ * form is used for a managed trust anchor that is not present in the peer's
+ * TLS Certificate message.  The certificate is parsed and the output is
+ * zeroed on failure; no network I/O occurs here. */
+int rintls_get_certificate_revocation_endpoints(
+    const void* certificate_der, rin_size_t certificate_len,
+    rintls_revocation_endpoints* endpoints);
+
 /* Validate a fetched DER CRL against the authenticated peer leaf and the
  * immediate issuer sent in the same TLS Certificate message.  `sequence`
  * must be supplied by the owner that controls its bounded evidence/cache
@@ -467,6 +475,17 @@ int rintls_verify_peer_crl_at(
     rintls_ctx* ctx, u32 certificate_index, const void* crl,
     rin_size_t crl_len, u64 sequence, rintls_revocation_evidence* evidence);
 
+/* Validate a fetched DER CRL against caller-owned certificate and issuer DER.
+ * Both certificates are parsed and the certificate signature is verified
+ * with the issuer key before CRL status is accepted.  `trusted_unix_time`
+ * must be non-zero and bound to the same authenticated time source used by
+ * the caller.  No network I/O occurs in this function. */
+int rintls_verify_certificate_crl(
+    const void* certificate_der, rin_size_t certificate_len,
+    const void* issuer_der, rin_size_t issuer_len,
+    const void* crl, rin_size_t crl_len, u64 trusted_unix_time,
+    u64 sequence, rintls_revocation_evidence* evidence);
+
 /* Validate a fetched DER OCSPResponse against the authenticated peer leaf
  * and the immediate issuer sent in the same TLS Certificate message.
  * `sequence` is supplied by the bounded evidence owner; no network I/O
@@ -480,6 +499,16 @@ int rintls_verify_peer_ocsp(rintls_ctx* ctx, const void* response,
 int rintls_verify_peer_ocsp_at(
     rintls_ctx* ctx, u32 certificate_index, const void* response,
     rin_size_t response_len, u64 sequence, rintls_revocation_evidence* evidence);
+
+/* Validate a fetched DER OCSP response against caller-owned certificate and
+ * issuer DER.  Certificate signature, issuer binding, response signature,
+ * status and trusted-time bounds are all required before evidence is
+ * returned.  No network I/O occurs in this function. */
+int rintls_verify_certificate_ocsp(
+    const void* certificate_der, rin_size_t certificate_len,
+    const void* issuer_der, rin_size_t issuer_len,
+    const void* response, rin_size_t response_len, u64 trusted_unix_time,
+    u64 sequence, rintls_revocation_evidence* evidence);
 
 /*
  * エラーメッセージを取得
