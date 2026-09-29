@@ -237,6 +237,9 @@ int rintls_set_options(rintls_ctx* ctx, u32 options)
 {
     if (!ctx) return RINTLS_ERR_MEMORY;
     if (ctx->handshake_started) return RINTLS_ERR_HANDSHAKE;
+    if ((options & RINTLS_OPT_TLS_1_2_ONLY) != 0u &&
+        (options & RINTLS_OPT_TLS_1_3_ONLY) != 0u)
+        return RINTLS_ERR_VERSION;
 #if !defined(RINTLS_ENABLE_INSECURE_VERIFY_NONE)
     if ((options & RINTLS_OPT_VERIFY_NONE) != 0) {
         ctx->last_error = RINTLS_ERR_CERTIFICATE;
@@ -246,6 +249,10 @@ int rintls_set_options(rintls_ctx* ctx, u32 options)
     ctx->options = options;
     ctx->handshake.is_server = (options & RINTLS_OPT_SERVER) ? 1 : 0;
     ctx->handshake.verify_none = (options & RINTLS_OPT_VERIFY_NONE) ? 1 : 0;
+    tls_handshake_set_version_policy(
+        &ctx->handshake,
+        (options & RINTLS_OPT_TLS_1_3_ONLY) == 0u,
+        (options & RINTLS_OPT_TLS_1_2_ONLY) == 0u);
     return RINTLS_OK;
 }
 
@@ -763,7 +770,9 @@ int rintls_handshake_step(rintls_ctx* ctx)
         ret = tls_send_server_hello(&ctx->handshake);
         break;
     case TLS_STATE_SERVER_HELLO_SENT:
-        ret = tls_send_server_encrypted_extensions(&ctx->handshake);
+        ret = ctx->handshake.is_tls13
+            ? tls_send_server_encrypted_extensions(&ctx->handshake)
+            : tls_send_server_certificate_tls12(&ctx->handshake);
         break;
     case TLS_STATE_SERVER_ENCRYPTED_EXTENSIONS_SENT:
         ret = tls_send_server_certificate(&ctx->handshake);
@@ -775,11 +784,45 @@ int rintls_handshake_step(rintls_ctx* ctx)
         ret = tls_send_finished(&ctx->handshake);
         break;
     case TLS_STATE_SERVER_FINISHED_SENT:
+        if (ctx->handshake.is_tls13) {
+            ret = tls_recv_finished(&ctx->handshake);
+            if (ret == TLS_HS_ERR_OK)
+                ret = tls13_derive_application_keys(&ctx->handshake);
+            if (ret == TLS_HS_ERR_OK)
+                ctx->handshake.state = TLS_STATE_CONNECTED;
+        } else {
+            ctx->handshake.state = TLS_STATE_CONNECTED;
+            ret = TLS_HS_ERR_OK;
+        }
+        break;
+    case TLS_STATE_SERVER_TLS12_CERTIFICATE_SENT:
+        ret = tls_send_server_key_exchange(&ctx->handshake);
+        break;
+    case TLS_STATE_SERVER_TLS12_KEY_EXCHANGE_SENT:
+        ret = tls_send_server_hello_done(&ctx->handshake);
+        break;
+    case TLS_STATE_SERVER_TLS12_HELLO_DONE_SENT:
+        ret = tls_recv_client_key_exchange(&ctx->handshake);
+        break;
+    case TLS_STATE_SERVER_TLS12_CLIENT_KEY_EXCHANGE_RECEIVED:
+        ret = tls12_derive_master_secret(&ctx->handshake);
+        if (ret == TLS_HS_ERR_OK)
+            ret = tls12_derive_keys(&ctx->handshake);
+        if (ret == TLS_HS_ERR_OK)
+            ctx->handshake.state = TLS_STATE_SERVER_TLS12_KEYS_DERIVED;
+        break;
+    case TLS_STATE_SERVER_TLS12_KEYS_DERIVED:
+        ret = tls_recv_change_cipher_spec(&ctx->handshake);
+        if (ret == TLS_HS_ERR_OK)
+            ctx->handshake.state =
+                TLS_STATE_SERVER_TLS12_CHANGE_CIPHER_SPEC_RECEIVED;
+        break;
+    case TLS_STATE_SERVER_TLS12_CHANGE_CIPHER_SPEC_RECEIVED:
         ret = tls_recv_finished(&ctx->handshake);
         if (ret == TLS_HS_ERR_OK)
-            ret = tls13_derive_application_keys(&ctx->handshake);
+            ret = tls_send_change_cipher_spec(&ctx->handshake);
         if (ret == TLS_HS_ERR_OK)
-            ctx->handshake.state = TLS_STATE_CONNECTED;
+            ret = tls_send_finished(&ctx->handshake);
         break;
     case TLS_STATE_CLIENT_HELLO_SENT:
         ret = tls_recv_server_hello(&ctx->handshake);
@@ -819,7 +862,12 @@ int rintls_handshake_step(rintls_ctx* ctx)
         if (ret == TLS_HS_ERR_OK) ret = tls_send_finished(&ctx->handshake);
         break;
     case TLS_STATE_FINISHED_RECEIVED:
-        ret = tls_send_change_cipher_spec(&ctx->handshake);
+        if (ctx->handshake.is_tls13) {
+            ret = tls_send_change_cipher_spec(&ctx->handshake);
+        } else {
+            ctx->handshake.state = TLS_STATE_CONNECTED;
+            ret = TLS_HS_ERR_OK;
+        }
         break;
     case TLS_STATE_CHANGE_CIPHER_SPEC:
         if (ctx->handshake.pending_send_kind != 0) {

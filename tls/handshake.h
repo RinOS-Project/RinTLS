@@ -127,7 +127,13 @@ typedef enum {
     TLS_STATE_SERVER_ENCRYPTED_EXTENSIONS_SENT,
     TLS_STATE_SERVER_CERTIFICATE_SENT,
     TLS_STATE_SERVER_CERTIFICATE_VERIFY_SENT,
-    TLS_STATE_SERVER_FINISHED_SENT
+    TLS_STATE_SERVER_FINISHED_SENT,
+    TLS_STATE_SERVER_TLS12_CERTIFICATE_SENT,
+    TLS_STATE_SERVER_TLS12_KEY_EXCHANGE_SENT,
+    TLS_STATE_SERVER_TLS12_HELLO_DONE_SENT,
+    TLS_STATE_SERVER_TLS12_CLIENT_KEY_EXCHANGE_RECEIVED,
+    TLS_STATE_SERVER_TLS12_KEYS_DERIVED,
+    TLS_STATE_SERVER_TLS12_CHANGE_CIPHER_SPEC_RECEIVED
 } tls_state_t;
 
 /* ═══════════════════════════════════════
@@ -149,6 +155,7 @@ typedef enum {
 #define TLS_MAX_CLIENT_CIPHER_SUITES 8u
 #define TLS_MAX_PEER_CIPHER_SUITES 32u
 #define TLS_MAX_PEER_SUPPORTED_VERSIONS 8u
+#define TLS_MAX_PEER_SUPPORTED_GROUPS 8u
 #define TLS_MAX_PEER_SIGNATURE_SCHEMES 64u
 
 typedef int (*tls_trust_anchor_verify_func)(void* opaque,
@@ -168,6 +175,8 @@ typedef struct {
     tls_state_t state;
     int is_tls13;
     int is_server;
+    int allow_tls12;
+    int allow_tls13;
 
     /* RINTLS_OPT_VERIFY_NONE: 証明書チェーン/署名検証をスキップ */
     int verify_none;
@@ -194,6 +203,8 @@ typedef struct {
     u16 peer_cipher_suite_count;
     u16 peer_supported_versions[TLS_MAX_PEER_SUPPORTED_VERSIONS];
     u16 peer_supported_version_count;
+    u16 peer_supported_groups[TLS_MAX_PEER_SUPPORTED_GROUPS];
+    u16 peer_supported_group_count;
     u16 peer_signature_schemes[TLS_MAX_PEER_SIGNATURE_SCHEMES];
     u16 peer_signature_scheme_count;
     u16 peer_key_share_group;
@@ -334,6 +345,9 @@ void tls_handshake_clear(tls_handshake_ctx_t* ctx);
 /* サーバー名を設定 (SNI) */
 void tls_handshake_set_server_name(tls_handshake_ctx_t* ctx, const char* name);
 
+void tls_handshake_set_version_policy(tls_handshake_ctx_t* ctx,
+                                      int allow_tls12, int allow_tls13);
+
 int tls_handshake_set_client_cipher_suites(tls_handshake_ctx_t* ctx,
                                            const u16* cipher_suites,
                                            rin_size_t cipher_suite_count);
@@ -400,6 +414,9 @@ int tls_send_server_hello(tls_handshake_ctx_t* ctx);
 int tls_send_server_encrypted_extensions(tls_handshake_ctx_t* ctx);
 int tls_send_server_certificate(tls_handshake_ctx_t* ctx);
 int tls_send_server_certificate_verify(tls_handshake_ctx_t* ctx);
+int tls_send_server_certificate_tls12(tls_handshake_ctx_t* ctx);
+int tls_send_server_key_exchange(tls_handshake_ctx_t* ctx);
+int tls_send_server_hello_done(tls_handshake_ctx_t* ctx);
 
 /* ═══════════════════════════════════════
  * 個別メッセージ処理 (内部用)
@@ -432,6 +449,7 @@ int tls_recv_server_hello_done(tls_handshake_ctx_t* ctx);
 
 /* ClientKeyExchangeを送信 (TLS 1.2) */
 int tls_send_client_key_exchange(tls_handshake_ctx_t* ctx);
+int tls_recv_client_key_exchange(tls_handshake_ctx_t* ctx);
 
 /* ChangeCipherSpecを送信 (TLS 1.2) */
 int tls_send_change_cipher_spec(tls_handshake_ctx_t* ctx);
