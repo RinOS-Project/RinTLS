@@ -14,6 +14,7 @@ static void tls12_prf_sha256(const u8* secret, rin_size_t secret_len,
                               const u8* label, rin_size_t label_len,
                               const u8* seed, rin_size_t seed_len,
                               u8* out, rin_size_t out_len);
+static int tls_client_signature_scheme_supported(u16 scheme);
 
 /* ═══════════════════════════════════════
  * 内部定数
@@ -463,6 +464,15 @@ static int tls_handshake_recv_message(tls_handshake_ctx_t* ctx,
             ctx->pending_recv_msg_len = used;
             return tls_handshake_map_io_error(received);
         }
+        if (ctx->is_server && ctx->is_tls13 &&
+            content_type == TLS_CONTENT_CHANGE_CIPHER_SPEC) {
+            /* RFC 8446 Appendix D.4 compatibility ChangeCipherSpec. */
+            if (received != 1 || ctx->pending_recv_msg[used] != 0x01u) {
+                ctx->pending_recv_msg_len = 0u;
+                return TLS_HS_ERR_UNEXPECTED;
+            }
+            continue;
+        }
         if (content_type != TLS_CONTENT_HANDSHAKE || received == 0) {
             ctx->pending_recv_msg_len = 0u;
             return TLS_HS_ERR_UNEXPECTED;
@@ -479,6 +489,10 @@ static int tls_handshake_recv_message(tls_handshake_ctx_t* ctx,
 #define TLS_PENDING_SEND_CHANGE_CIPHER_SPEC  4
 #define TLS_PENDING_SEND_CLIENT_CERTIFICATE  5
 #define TLS_PENDING_SEND_CLIENT_CERTIFICATE_VERIFY 6
+#define TLS_PENDING_SEND_SERVER_HELLO 7
+#define TLS_PENDING_SEND_SERVER_ENCRYPTED_EXTENSIONS 8
+#define TLS_PENDING_SEND_SERVER_CERTIFICATE 9
+#define TLS_PENDING_SEND_SERVER_CERTIFICATE_VERIFY 10
 
 static void tls_handshake_clear_pending_send(tls_handshake_ctx_t* ctx)
 {
@@ -556,6 +570,267 @@ static int tls_handshake_flush_pending_send(tls_handshake_ctx_t* ctx, u8 expecte
     return TLS_HS_ERR_OK;
 }
 
+static int tls_server_peer_offers(u16 offered, const tls_handshake_ctx_t* ctx)
+{
+    for (u16 index = 0u; index < ctx->peer_signature_scheme_count; ++index) {
+        if (ctx->peer_signature_schemes[index] == offered) return 1;
+    }
+    return 0;
+}
+
+int tls_recv_client_hello(tls_handshake_ctx_t* ctx)
+{
+    u8 msg[TLS_MAX_PENDING_HANDSHAKE_RECV];
+    u8 message_type = 0u;
+    int len;
+
+    if (!ctx || !ctx->is_server || ctx->state != TLS_STATE_INIT)
+        return TLS_HS_ERR_UNEXPECTED;
+
+    len = tls_handshake_recv_message(ctx, msg, sizeof(msg), &message_type);
+    if (len < 0) return len;
+    if (message_type != TLS_HS_CLIENT_HELLO ||
+        tls_parse_client_hello(ctx, msg, (rin_size_t)len) != TLS_HS_ERR_OK) {
+        ctx->state = TLS_STATE_ERROR;
+        return TLS_HS_ERR_UNEXPECTED;
+    }
+
+    int offered_tls13 = 0;
+    for (u16 index = 0u; index < ctx->peer_supported_version_count; ++index) {
+        if (ctx->peer_supported_versions[index] == TLS_VERSION_1_3) {
+            offered_tls13 = 1;
+            break;
+        }
+    }
+    int offered_aes128 = 0;
+    for (u16 index = 0u; index < ctx->peer_cipher_suite_count; ++index) {
+        if (ctx->peer_cipher_suites[index] == TLS13_AES_128_GCM_SHA256) {
+            offered_aes128 = 1;
+            break;
+        }
+    }
+    if (!offered_tls13) return TLS_HS_ERR_VERSION;
+    if (!offered_aes128) return TLS_HS_ERR_CIPHER;
+    if (ctx->peer_key_share_group != TLS_GROUP_X25519 ||
+        ctx->peer_key_share_len != 32u)
+        return TLS_HS_ERR_KEY_EXCHANGE;
+
+    ctx->is_tls13 = 1;
+    ctx->version = TLS_VERSION_1_3;
+    ctx->cipher_suite = TLS13_AES_128_GCM_SHA256;
+    ctx->named_group = TLS_GROUP_X25519;
+    rintls_memcpy(ctx->peer_public_key, ctx->peer_key_share, 32u);
+    ctx->peer_public_key_len = 32u;
+    if (x25519_keygen(&ctx->x25519_keypair) != ECDH_OK ||
+        x25519_ecdh(ctx->shared_secret, ctx->x25519_keypair.private_key,
+                    ctx->peer_public_key) != ECDH_OK) {
+        ctx->state = TLS_STATE_ERROR;
+        return TLS_HS_ERR_KEY_EXCHANGE;
+    }
+    ctx->shared_secret_len = 32u;
+    if (rintls_random_bytes(ctx->server_random, sizeof(ctx->server_random)) != 0) {
+        ctx->state = TLS_STATE_ERROR;
+        return TLS_HS_ERR_RANDOM;
+    }
+
+    ctx->record->version = TLS_VERSION_1_3;
+    ctx->record->is_tls13 = 1;
+    tls_transcript_update(ctx, msg, (rin_size_t)len);
+    ctx->state = TLS_STATE_SERVER_CLIENT_HELLO_RECEIVED;
+    if (!ctx->server_certificate_configured)
+        return TLS_HS_ERR_WANT_CREDENTIALS;
+    return TLS_HS_ERR_OK;
+}
+
+int tls_send_server_hello(tls_handshake_ctx_t* ctx)
+{
+    u8 msg[512];
+    rin_size_t pos = 0u;
+    if (!ctx || !ctx->is_server ||
+        ctx->state != TLS_STATE_SERVER_CLIENT_HELLO_RECEIVED)
+        return TLS_HS_ERR_UNEXPECTED;
+    if (ctx->pending_send_kind != TLS_PENDING_SEND_NONE) {
+        int pending = tls_handshake_flush_pending_send(
+            ctx, TLS_PENDING_SEND_SERVER_HELLO);
+        if (pending != TLS_HS_ERR_OK) return pending;
+        return tls13_derive_handshake_keys(ctx);
+    }
+
+    msg[pos++] = TLS_HS_SERVER_HELLO;
+    rin_size_t length_pos = pos;
+    pos += 3u;
+    rin_size_t body_start = pos;
+    write_u16(msg + pos, TLS_VERSION_1_2);
+    pos += 2u;
+    rintls_memcpy(msg + pos, ctx->server_random, 32u);
+    pos += 32u;
+    msg[pos++] = 0u;
+    write_u16(msg + pos, TLS13_AES_128_GCM_SHA256);
+    pos += 2u;
+    msg[pos++] = 0u;
+
+    rin_size_t extensions_length_pos = pos;
+    pos += 2u;
+    rin_size_t extensions_start = pos;
+    write_u16(msg + pos, TLS_EXT_SUPPORTED_VERSIONS);
+    pos += 2u;
+    write_u16(msg + pos, 2u);
+    pos += 2u;
+    write_u16(msg + pos, TLS_VERSION_1_3);
+    pos += 2u;
+    write_u16(msg + pos, TLS_EXT_KEY_SHARE);
+    pos += 2u;
+    write_u16(msg + pos, 36u);
+    pos += 2u;
+    write_u16(msg + pos, TLS_GROUP_X25519);
+    pos += 2u;
+    write_u16(msg + pos, 32u);
+    pos += 2u;
+    rintls_memcpy(msg + pos, ctx->x25519_keypair.public_key, 32u);
+    pos += 32u;
+    write_u16(msg + extensions_length_pos, (u16)(pos - extensions_start));
+    write_u24(msg + length_pos, (u32)(pos - body_start));
+
+    int result = tls_handshake_stage_pending_send(
+        ctx, TLS_PENDING_SEND_SERVER_HELLO, 0, TLS_CONTENT_HANDSHAKE,
+        TLS_VERSION_1_2, msg, pos, 1, TLS_STATE_SERVER_HELLO_SENT);
+    if (result != TLS_HS_ERR_OK) return result;
+    result = tls_handshake_flush_pending_send(ctx,
+                                              TLS_PENDING_SEND_SERVER_HELLO);
+    if (result != TLS_HS_ERR_OK) return result;
+    return tls13_derive_handshake_keys(ctx);
+}
+
+int tls_send_server_encrypted_extensions(tls_handshake_ctx_t* ctx)
+{
+    u8 msg[64];
+    rin_size_t pos = 0u;
+    if (!ctx || !ctx->is_server ||
+        ctx->state != TLS_STATE_SERVER_HELLO_SENT)
+        return TLS_HS_ERR_UNEXPECTED;
+    msg[pos++] = TLS_HS_ENCRYPTED_EXTENSIONS;
+    rin_size_t length_pos = pos;
+    pos += 3u;
+    rin_size_t body_start = pos;
+    rin_size_t extension_length_pos = pos;
+    pos += 2u;
+    rin_size_t extension_start = pos;
+    if (ctx->peer_offered_http11) {
+        write_u16(msg + pos, TLS_EXT_ALPN);
+        pos += 2u;
+        write_u16(msg + pos, 11u);
+        pos += 2u;
+        write_u16(msg + pos, 9u);
+        pos += 2u;
+        msg[pos++] = 8u;
+        rintls_memcpy(msg + pos, "http/1.1", 8u);
+        pos += 8u;
+    }
+    write_u16(msg + extension_length_pos, (u16)(pos - extension_start));
+    write_u24(msg + length_pos, (u32)(pos - body_start));
+    int result = tls_handshake_stage_pending_send(
+        ctx, TLS_PENDING_SEND_SERVER_ENCRYPTED_EXTENSIONS, 1,
+        TLS_CONTENT_HANDSHAKE, TLS_VERSION_1_3, msg, pos, 1,
+        TLS_STATE_SERVER_ENCRYPTED_EXTENSIONS_SENT);
+    if (result != TLS_HS_ERR_OK) return result;
+    return tls_handshake_flush_pending_send(
+        ctx, TLS_PENDING_SEND_SERVER_ENCRYPTED_EXTENSIONS);
+}
+
+int tls_send_server_certificate(tls_handshake_ctx_t* ctx)
+{
+    if (!ctx || !ctx->is_server ||
+        ctx->state != TLS_STATE_SERVER_ENCRYPTED_EXTENSIONS_SENT ||
+        !ctx->server_certificate_list || ctx->server_certificate_list_len < 3u)
+        return TLS_HS_ERR_CERTIFICATE;
+    u8 msg[TLS_MAX_PENDING_HANDSHAKE_SEND];
+    rin_size_t pos = 0u;
+    if (ctx->server_certificate_list_len + 5u > sizeof(msg))
+        return TLS_HS_ERR_CERTIFICATE;
+    msg[pos++] = TLS_HS_CERTIFICATE;
+    write_u24(msg + pos, (u32)(1u + ctx->server_certificate_list_len));
+    pos += 3u;
+    msg[pos++] = 0u;
+    rintls_memcpy(msg + pos, ctx->server_certificate_list,
+                  ctx->server_certificate_list_len);
+    pos += ctx->server_certificate_list_len;
+    int result = tls_handshake_stage_pending_send(
+        ctx, TLS_PENDING_SEND_SERVER_CERTIFICATE, 1, TLS_CONTENT_HANDSHAKE,
+        TLS_VERSION_1_3, msg, pos, 1, TLS_STATE_SERVER_CERTIFICATE_SENT);
+    if (result != TLS_HS_ERR_OK) return result;
+    return tls_handshake_flush_pending_send(
+        ctx, TLS_PENDING_SEND_SERVER_CERTIFICATE);
+}
+
+int tls_send_server_certificate_verify(tls_handshake_ctx_t* ctx)
+{
+    if (!ctx || !ctx->is_server ||
+        ctx->state != TLS_STATE_SERVER_CERTIFICATE_SENT ||
+        !ctx->server_certificate_sign)
+        return TLS_HS_ERR_CERTIFICATE;
+
+    if (ctx->server_signature_scheme == 0u) {
+        static const u16 preferred[] = {
+            TLS_SIG_RSA_PSS_RSAE_SHA256,
+            TLS_SIG_ECDSA_SECP256R1_SHA256,
+            TLS_SIG_ECDSA_SECP384R1_SHA384,
+            TLS_SIG_ECDSA_SECP521R1_SHA512
+        };
+        for (rin_size_t i = 0u; i < sizeof(preferred) / sizeof(preferred[0]); ++i) {
+            if (tls_server_peer_offers(preferred[i], ctx)) {
+                ctx->server_signature_scheme = preferred[i];
+                break;
+            }
+        }
+    }
+    if (!tls_client_signature_scheme_supported(ctx->server_signature_scheme) ||
+        !tls_server_peer_offers(ctx->server_signature_scheme, ctx))
+        return TLS_HS_ERR_SIGNATURE;
+
+    u8 transcript_hash[48];
+    rin_size_t hash_len = ctx->use_sha384 ? 48u : 32u;
+    tls_transcript_hash(ctx, transcript_hash);
+    static const u8 label[] = "TLS 1.3, server CertificateVerify";
+    u8 signed_data[64u + sizeof(label) - 1u + 1u + 48u];
+    rin_size_t signed_len = 64u;
+    rintls_memset(signed_data, 0x20, 64u);
+    rintls_memcpy(signed_data + signed_len, label, sizeof(label) - 1u);
+    signed_len += sizeof(label) - 1u;
+    signed_data[signed_len++] = 0u;
+    rintls_memcpy(signed_data + signed_len, transcript_hash, hash_len);
+    signed_len += hash_len;
+
+    u8 signature[TLS_MAX_CLIENT_SIGNATURE_BYTES];
+    rin_size_t signature_len = 0u;
+    if (ctx->server_certificate_sign(
+            ctx->server_certificate_sign_opaque, ctx->server_signature_scheme,
+            signed_data, signed_len, signature, sizeof(signature),
+            &signature_len) != 0 || signature_len == 0u ||
+        signature_len > sizeof(signature))
+        return TLS_HS_ERR_SIGNATURE;
+
+    u8 msg[TLS_MAX_PENDING_HANDSHAKE_SEND];
+    rin_size_t pos = 0u;
+    msg[pos++] = TLS_HS_CERTIFICATE_VERIFY;
+    write_u24(msg + pos, (u32)(4u + signature_len));
+    pos += 3u;
+    write_u16(msg + pos, ctx->server_signature_scheme);
+    pos += 2u;
+    write_u16(msg + pos, (u16)signature_len);
+    pos += 2u;
+    rintls_memcpy(msg + pos, signature, signature_len);
+    pos += signature_len;
+    rintls_secure_zero(signature, sizeof(signature));
+
+    int result = tls_handshake_stage_pending_send(
+        ctx, TLS_PENDING_SEND_SERVER_CERTIFICATE_VERIFY, 1,
+        TLS_CONTENT_HANDSHAKE, TLS_VERSION_1_3, msg, pos, 1,
+        TLS_STATE_SERVER_CERTIFICATE_VERIFY_SENT);
+    if (result != TLS_HS_ERR_OK) return result;
+    return tls_handshake_flush_pending_send(
+        ctx, TLS_PENDING_SEND_SERVER_CERTIFICATE_VERIFY);
+}
+
 /* ═══════════════════════════════════════
  * 初期化・終了
  * ═══════════════════════════════════════ */
@@ -610,6 +885,12 @@ void tls_handshake_clear(tls_handshake_ctx_t* ctx)
                            ctx->client_certificate_list_len);
         rintls_mem_free(ctx->client_certificate_list);
         ctx->client_certificate_list = RIN_NULL;
+    }
+    if (ctx->server_certificate_list) {
+        rintls_secure_zero(ctx->server_certificate_list,
+                           ctx->server_certificate_list_len);
+        rintls_mem_free(ctx->server_certificate_list);
+        ctx->server_certificate_list = RIN_NULL;
     }
     rsa_pubkey_clear(&ctx->server_rsa_key);
     rintls_secure_zero(ctx, sizeof(tls_handshake_ctx_t));
@@ -763,6 +1044,90 @@ static int tls_client_signature_scheme_supported(u16 scheme)
     default:
         return 0;
     }
+}
+
+static int tls_server_certificate_list_valid(const u8* bytes,
+                                             rin_size_t certificate_list_len)
+{
+    if (!bytes || certificate_list_len < 3u ||
+        certificate_list_len > TLS_MAX_PEER_CERTIFICATE_CHAIN_BYTES)
+        return 0;
+
+    u32 list_len = read_u24(bytes);
+    if (list_len != certificate_list_len - 3u || list_len == 0u)
+        return 0;
+
+    const u8* p = bytes + 3u;
+    const u8* end = bytes + certificate_list_len;
+    u32 count = 0u;
+    while (p < end) {
+        if ((size_t)(end - p) < 3u) return 0;
+        u32 cert_len = read_u24(p);
+        p += 3u;
+        if (cert_len == 0u || cert_len > RINTLS_MAX_CERT_SIZE ||
+            (size_t)(end - p) < cert_len)
+            return 0;
+        p += cert_len;
+        if ((size_t)(end - p) < 2u) return 0;
+        u16 extensions_len = read_u16(p);
+        p += 2u;
+        if ((size_t)(end - p) < extensions_len ||
+            !tls_client_certificate_extensions_valid(p, extensions_len))
+            return 0;
+        p += extensions_len;
+        if (++count > RINTLS_MAX_CERT_CHAIN) return 0;
+    }
+    return p == end && count != 0u;
+}
+
+int tls_handshake_set_server_certificate(
+    tls_handshake_ctx_t* ctx, const void* certificate_list,
+    rin_size_t certificate_list_len,
+    tls_server_certificate_sign_func signer, void* signer_opaque)
+{
+    const u8* bytes = (const u8*)certificate_list;
+    if (!ctx || !signer || !tls_server_certificate_list_valid(
+            bytes, certificate_list_len) ||
+        (ctx->state != TLS_STATE_INIT &&
+         ctx->state != TLS_STATE_SERVER_CLIENT_HELLO_RECEIVED) ||
+        ctx->server_certificate_list)
+        return TLS_HS_ERR_CERTIFICATE;
+
+    ctx->server_certificate_list = rintls_malloc(certificate_list_len);
+    if (!ctx->server_certificate_list) return TLS_HS_ERR_IO;
+    rintls_memcpy(ctx->server_certificate_list, bytes, certificate_list_len);
+    ctx->server_certificate_list_len = certificate_list_len;
+    ctx->server_certificate_sign = signer;
+    ctx->server_certificate_sign_opaque = signer_opaque;
+    ctx->server_signature_scheme = 0u;
+    ctx->server_certificate_configured = 1;
+    return TLS_HS_ERR_OK;
+}
+
+int tls_handshake_set_server_certificate_for_scheme(
+    tls_handshake_ctx_t* ctx, const void* certificate_list,
+    rin_size_t certificate_list_len,
+    tls_server_certificate_sign_func signer, void* signer_opaque,
+    u16 signature_scheme)
+{
+    if (!ctx || !tls_client_signature_scheme_supported(signature_scheme))
+        return TLS_HS_ERR_CERTIFICATE;
+    if (ctx->client_hello_received) {
+        u16 index;
+        int offered = 0;
+        for (index = 0u; index < ctx->peer_signature_scheme_count; ++index) {
+            if (ctx->peer_signature_schemes[index] == signature_scheme) {
+                offered = 1;
+                break;
+            }
+        }
+        if (!offered) return TLS_HS_ERR_SIGNATURE;
+    }
+    int result = tls_handshake_set_server_certificate(
+        ctx, certificate_list, certificate_list_len, signer, signer_opaque);
+    if (result == TLS_HS_ERR_OK)
+        ctx->server_signature_scheme = signature_scheme;
+    return result;
 }
 
 int tls_handshake_set_client_certificate_for_scheme(
@@ -1583,10 +1948,19 @@ int tls13_derive_handshake_keys(tls_handshake_ctx_t* ctx)
         u8 sk[16], si[12], ck[16], ci[12];
         for (i = 0; i < 16; i++) { sk[i] = server_key[i]; ck[i] = client_key[i]; }
         for (i = 0; i < 12; i++) { si[i] = server_iv[i]; ci[i] = client_iv[i]; }
-        tls_record_enable_cipher_1_3(ctx->record, TLS_CIPHER_AES_128_GCM,
-                                      sk, 16, si, 12, 0);
-        tls_record_enable_cipher_1_3(ctx->record, TLS_CIPHER_AES_128_GCM,
-                                      ck, 16, ci, 12, 1);
+        /* A client reads server traffic and writes client traffic. A server
+         * has the inverse record directions. */
+        if (ctx->is_server) {
+            tls_record_enable_cipher_1_3(ctx->record, TLS_CIPHER_AES_128_GCM,
+                                          ck, 16, ci, 12, 0);
+            tls_record_enable_cipher_1_3(ctx->record, TLS_CIPHER_AES_128_GCM,
+                                          sk, 16, si, 12, 1);
+        } else {
+            tls_record_enable_cipher_1_3(ctx->record, TLS_CIPHER_AES_128_GCM,
+                                          sk, 16, si, 12, 0);
+            tls_record_enable_cipher_1_3(ctx->record, TLS_CIPHER_AES_128_GCM,
+                                          ck, 16, ci, 12, 1);
+        }
     }
 
     return TLS_HS_ERR_OK;
@@ -1689,10 +2063,17 @@ int tls13_derive_application_keys(tls_handshake_ctx_t* ctx)
         u8 sk[16], si[12], ck[16], ci[12];
         for (i = 0; i < 16; i++) { sk[i] = server_key[i]; ck[i] = client_key[i]; }
         for (i = 0; i < 12; i++) { si[i] = server_iv[i]; ci[i] = client_iv[i]; }
-        tls_record_enable_cipher_1_3(ctx->record, TLS_CIPHER_AES_128_GCM,
-                                      sk, 16, si, 12, 0);
-        tls_record_enable_cipher_1_3(ctx->record, TLS_CIPHER_AES_128_GCM,
-                                      ck, 16, ci, 12, 1);
+        if (ctx->is_server) {
+            tls_record_enable_cipher_1_3(ctx->record, TLS_CIPHER_AES_128_GCM,
+                                          ck, 16, ci, 12, 0);
+            tls_record_enable_cipher_1_3(ctx->record, TLS_CIPHER_AES_128_GCM,
+                                          sk, 16, si, 12, 1);
+        } else {
+            tls_record_enable_cipher_1_3(ctx->record, TLS_CIPHER_AES_128_GCM,
+                                          sk, 16, si, 12, 0);
+            tls_record_enable_cipher_1_3(ctx->record, TLS_CIPHER_AES_128_GCM,
+                                          ck, 16, ci, 12, 1);
+        }
     }
 
     rintls_debug("[TLS_APP] Application keys enabled successfully\n");
@@ -2378,11 +2759,13 @@ int tls_recv_finished(tls_handshake_ctx_t* ctx)
             }
         }
 
-        /* finished_key = HKDF-Expand-Label(server_hs_traffic_secret, "finished", "", 32)
-         * 一時バッファに出力してからvolatileにコピー */
+        /* finished_key uses the sender's handshake traffic secret.  Copy
+         * through a temporary buffer before the volatile destination. */
         {
             u8 tmp_key[32];
-            tls13_hkdf_expand_label(ctx->server_handshake_traffic_secret,
+            tls13_hkdf_expand_label(ctx->is_server
+                                         ? ctx->client_handshake_traffic_secret
+                                         : ctx->server_handshake_traffic_secret,
                                      TLS13_LABEL_FINISHED, 8,
                                      RIN_NULL, 0,
                                      tmp_key, 32);
@@ -2445,6 +2828,11 @@ int tls_recv_finished(tls_handshake_ctx_t* ctx)
         rintls_debug("[TLS12] ServerFinished VERIFY OK!\n");
     }
 
+    if (ctx->is_tls13 && !ctx->is_server) {
+        /* Application traffic keys use the transcript through the server
+         * Finished, before the client Finished is added. */
+        tls_transcript_hash(ctx, ctx->server_finished_transcript);
+    }
     tls_transcript_update(ctx, msg, 4 + msg_len);
 
     ctx->state = TLS_STATE_FINISHED_RECEIVED;
@@ -2467,9 +2855,12 @@ int tls_send_finished(tls_handshake_ctx_t* ctx)
     u8 transcript[32];
 
     if (ctx->is_tls13) {
-        tls_transcript_hash(ctx, ctx->server_finished_transcript);
+        if (ctx->is_server)
+            tls_transcript_hash(ctx, ctx->server_finished_transcript);
 
-        tls13_hkdf_expand_label(ctx->client_handshake_traffic_secret,
+        tls13_hkdf_expand_label(ctx->is_server
+                                     ? ctx->server_handshake_traffic_secret
+                                     : ctx->client_handshake_traffic_secret,
                                  TLS13_LABEL_FINISHED, 8,
                                  RIN_NULL, 0,
                                  finished_key, 32);
@@ -2505,7 +2896,9 @@ int tls_send_finished(tls_handshake_ctx_t* ctx)
                                                msg,
                                                pos,
                                                1,
-                                               TLS_STATE_FINISHED_SENT);
+                                               ctx->is_server
+                                                   ? TLS_STATE_SERVER_FINISHED_SENT
+                                                   : TLS_STATE_FINISHED_SENT);
     if (ret != TLS_HS_ERR_OK) {
         return ret;
     }

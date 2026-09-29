@@ -161,6 +161,7 @@ _Static_assert(sizeof(rintls_revocation_evidence) == 136u,
 #define RINTLS_OPT_VERIFY_NONE          0x0001  /* 開発専用。通常ビルドでは拒否 */
 #define RINTLS_OPT_TLS_1_2_ONLY         0x0002  /* TLS 1.2のみ */
 #define RINTLS_OPT_TLS_1_3_ONLY         0x0004  /* TLS 1.3のみ */
+#define RINTLS_OPT_SERVER               0x0008  /* TLS server endpoint */
 
 /* ═══════════════════════════════════════
  * コンテキスト (不透明型)
@@ -187,6 +188,37 @@ typedef int (*rintls_client_certificate_sign_func)(
  * enters RinTLS. */
 typedef int (*rintls_client_certificate_provider_func)(
     rintls_ctx* ctx, void* opaque);
+
+typedef rintls_client_certificate_sign_func
+    rintls_server_certificate_sign_func;
+
+/* Bounded ClientHello selection input exposed to a server certificate
+ * provider. All pointers are borrowed from the context and remain valid
+ * until the provider returns or the context is freed. */
+typedef struct rintls_server_client_hello {
+    u32 struct_size;
+    u32 version;
+    const char* server_name;
+    u32 server_name_size;
+    const u16* cipher_suites;
+    u32 cipher_suite_count;
+    const u16* supported_versions;
+    u32 supported_version_count;
+    const u16* signature_schemes;
+    u32 signature_scheme_count;
+    u16 key_share_group;
+    const u8* key_share;
+    u32 key_share_size;
+    u32 offered_features;
+    u64 reserved[2];
+} rintls_server_client_hello;
+
+#define RINTLS_SERVER_CLIENT_HELLO_VERSION 1u
+#define RINTLS_SERVER_CLIENT_HELLO_HTTP11 0x00000001u
+
+typedef int (*rintls_server_certificate_provider_func)(
+    rintls_ctx* ctx, const rintls_server_client_hello* client_hello,
+    void* opaque);
 
 #define RINTLS_MAX_CLIENT_CERTIFICATE_CHAIN (16u * 1024u)
 #define RINTLS_MAX_CLIENT_CERTIFICATE_BYTES (16u * 1024u)
@@ -314,6 +346,26 @@ int rintls_set_client_certificate_for_scheme(
 int rintls_set_client_certificate_provider(
     rintls_ctx* ctx, rintls_client_certificate_provider_func provider,
     void* provider_opaque);
+
+/* Configure a TLS 1.3 server certificate_list and an opaque-key signer.
+ * The list uses the TLS wire format: a 3-byte total length followed by
+ * DER length/certificate/entry-extension records. */
+int rintls_set_server_certificate(
+    rintls_ctx* ctx, const void* certificate_list,
+    rin_size_t certificate_list_len,
+    rintls_server_certificate_sign_func signer, void* signer_opaque);
+int rintls_set_server_certificate_for_scheme(
+    rintls_ctx* ctx, const void* certificate_list,
+    rin_size_t certificate_list_len,
+    rintls_server_certificate_sign_func signer, void* signer_opaque,
+    u16 signature_scheme);
+
+/* Bind a one-shot SNI/signature-scheme based server identity provider. */
+int rintls_set_server_certificate_provider(
+    rintls_ctx* ctx, rintls_server_certificate_provider_func provider,
+    void* provider_opaque);
+int rintls_get_server_client_hello(
+    const rintls_ctx* ctx, rintls_server_client_hello* client_hello);
 
 /* Whether the peer requested a client certificate during this handshake. */
 int rintls_client_certificate_requested(const rintls_ctx* ctx);

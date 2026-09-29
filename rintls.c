@@ -61,6 +61,10 @@ struct rintls_ctx {
     void* client_certificate_provider_opaque;
     int client_certificate_provider_called;
     int client_certificate_configured;
+
+    rintls_server_certificate_provider_func server_certificate_provider;
+    void* server_certificate_provider_opaque;
+    int server_certificate_provider_called;
 };
 
 #define RINTLS_MAX_TRUST_ANCHORS 256u
@@ -240,6 +244,7 @@ int rintls_set_options(rintls_ctx* ctx, u32 options)
     }
 #endif
     ctx->options = options;
+    ctx->handshake.is_server = (options & RINTLS_OPT_SERVER) ? 1 : 0;
     ctx->handshake.verify_none = (options & RINTLS_OPT_VERIFY_NONE) ? 1 : 0;
     return RINTLS_OK;
 }
@@ -330,6 +335,95 @@ int rintls_set_client_certificate_provider(
     ctx->client_certificate_provider = provider;
     ctx->client_certificate_provider_opaque = provider_opaque;
     ctx->client_certificate_provider_called = 0;
+    return RINTLS_OK;
+}
+
+int rintls_set_server_certificate(
+    rintls_ctx* ctx, const void* certificate_list,
+    rin_size_t certificate_list_len,
+    rintls_server_certificate_sign_func signer, void* signer_opaque)
+{
+    if (!ctx) return RINTLS_ERR_MEMORY;
+    if ((ctx->options & RINTLS_OPT_SERVER) == 0u)
+        return RINTLS_ERR_UNSUPPORTED;
+    if (ctx->handshake_started &&
+        ctx->handshake.state != TLS_STATE_SERVER_CLIENT_HELLO_RECEIVED)
+        return RINTLS_ERR_HANDSHAKE;
+    int result = tls_handshake_set_server_certificate(
+        &ctx->handshake, certificate_list, certificate_list_len,
+        (tls_server_certificate_sign_func)signer, signer_opaque);
+    if (result == TLS_HS_ERR_OK) return RINTLS_OK;
+    if (result == TLS_HS_ERR_IO) return RINTLS_ERR_MEMORY;
+    if (result == TLS_HS_ERR_SIGNATURE) return RINTLS_ERR_CERTIFICATE;
+    return RINTLS_ERR_CERTIFICATE;
+}
+
+int rintls_set_server_certificate_for_scheme(
+    rintls_ctx* ctx, const void* certificate_list,
+    rin_size_t certificate_list_len,
+    rintls_server_certificate_sign_func signer, void* signer_opaque,
+    u16 signature_scheme)
+{
+    if (!ctx) return RINTLS_ERR_MEMORY;
+    if ((ctx->options & RINTLS_OPT_SERVER) == 0u)
+        return RINTLS_ERR_UNSUPPORTED;
+    if (ctx->handshake_started &&
+        ctx->handshake.state != TLS_STATE_SERVER_CLIENT_HELLO_RECEIVED)
+        return RINTLS_ERR_HANDSHAKE;
+    int result = tls_handshake_set_server_certificate_for_scheme(
+        &ctx->handshake, certificate_list, certificate_list_len,
+        (tls_server_certificate_sign_func)signer, signer_opaque,
+        signature_scheme);
+    if (result == TLS_HS_ERR_OK) return RINTLS_OK;
+    if (result == TLS_HS_ERR_IO) return RINTLS_ERR_MEMORY;
+    if (result == TLS_HS_ERR_SIGNATURE) return RINTLS_ERR_CERTIFICATE;
+    return RINTLS_ERR_CERTIFICATE;
+}
+
+int rintls_set_server_certificate_provider(
+    rintls_ctx* ctx, rintls_server_certificate_provider_func provider,
+    void* provider_opaque)
+{
+    if (!ctx) return RINTLS_ERR_MEMORY;
+    if ((ctx->options & RINTLS_OPT_SERVER) == 0u)
+        return RINTLS_ERR_UNSUPPORTED;
+    if (ctx->handshake_started || ctx->server_certificate_provider_called)
+        return RINTLS_ERR_HANDSHAKE;
+    ctx->server_certificate_provider = provider;
+    ctx->server_certificate_provider_opaque = provider_opaque;
+    ctx->server_certificate_provider_called = 0;
+    return RINTLS_OK;
+}
+
+int rintls_get_server_client_hello(
+    const rintls_ctx* ctx, rintls_server_client_hello* client_hello)
+{
+    rin_size_t name_len = 0u;
+    if (!ctx || !client_hello ||
+        client_hello->struct_size < sizeof(*client_hello) ||
+        !ctx->handshake.is_server || !ctx->handshake.client_hello_received)
+        return RINTLS_ERR_HANDSHAKE;
+    while (name_len < sizeof(ctx->handshake.server_name) &&
+           ctx->handshake.server_name[name_len] != '\0')
+        ++name_len;
+    rintls_memset((u8*)client_hello + sizeof(u32) * 2u, 0,
+                  sizeof(*client_hello) - sizeof(u32) * 2u);
+    client_hello->version = RINTLS_SERVER_CLIENT_HELLO_VERSION;
+    client_hello->server_name = ctx->handshake.server_name;
+    client_hello->server_name_size = (u32)name_len;
+    client_hello->cipher_suites = ctx->handshake.peer_cipher_suites;
+    client_hello->cipher_suite_count = ctx->handshake.peer_cipher_suite_count;
+    client_hello->supported_versions = ctx->handshake.peer_supported_versions;
+    client_hello->supported_version_count =
+        ctx->handshake.peer_supported_version_count;
+    client_hello->signature_schemes = ctx->handshake.peer_signature_schemes;
+    client_hello->signature_scheme_count =
+        ctx->handshake.peer_signature_scheme_count;
+    client_hello->key_share_group = ctx->handshake.peer_key_share_group;
+    client_hello->key_share = ctx->handshake.peer_key_share;
+    client_hello->key_share_size = (u32)ctx->handshake.peer_key_share_len;
+    client_hello->offered_features = ctx->handshake.peer_offered_http11
+        ? RINTLS_SERVER_CLIENT_HELLO_HTTP11 : 0u;
     return RINTLS_OK;
 }
 
@@ -617,6 +711,30 @@ int rintls_handshake(rintls_ctx* ctx)
             }
             continue;
         }
+        if (ret == RINTLS_ERR_WANT_CREDENTIALS &&
+            ctx->handshake.is_server &&
+            ctx->server_certificate_provider != RIN_NULL &&
+            !ctx->server_certificate_provider_called) {
+            rintls_server_client_hello client_hello;
+            rintls_memset(&client_hello, 0, sizeof(client_hello));
+            client_hello.struct_size = sizeof(client_hello);
+            ctx->server_certificate_provider_called = 1;
+            if (rintls_get_server_client_hello(ctx, &client_hello) != RINTLS_OK) {
+                ctx->last_error = RINTLS_ERR_HANDSHAKE;
+                return RINTLS_ERR_HANDSHAKE;
+            }
+            int provider_result = ctx->server_certificate_provider(
+                ctx, &client_hello, ctx->server_certificate_provider_opaque);
+            if (provider_result != RINTLS_OK) {
+                ctx->last_error = provider_result;
+                return provider_result;
+            }
+            if (!ctx->handshake.server_certificate_configured) {
+                ctx->last_error = RINTLS_ERR_CERTIFICATE;
+                return RINTLS_ERR_CERTIFICATE;
+            }
+            continue;
+        }
         if (ret == RINTLS_OK) {
             return RINTLS_OK;
         }
@@ -637,7 +755,31 @@ int rintls_handshake_step(rintls_ctx* ctx)
 
     switch (ctx->handshake.state) {
     case TLS_STATE_INIT:
-        ret = tls_send_client_hello(&ctx->handshake);
+        ret = ctx->handshake.is_server
+            ? tls_recv_client_hello(&ctx->handshake)
+            : tls_send_client_hello(&ctx->handshake);
+        break;
+    case TLS_STATE_SERVER_CLIENT_HELLO_RECEIVED:
+        ret = tls_send_server_hello(&ctx->handshake);
+        break;
+    case TLS_STATE_SERVER_HELLO_SENT:
+        ret = tls_send_server_encrypted_extensions(&ctx->handshake);
+        break;
+    case TLS_STATE_SERVER_ENCRYPTED_EXTENSIONS_SENT:
+        ret = tls_send_server_certificate(&ctx->handshake);
+        break;
+    case TLS_STATE_SERVER_CERTIFICATE_SENT:
+        ret = tls_send_server_certificate_verify(&ctx->handshake);
+        break;
+    case TLS_STATE_SERVER_CERTIFICATE_VERIFY_SENT:
+        ret = tls_send_finished(&ctx->handshake);
+        break;
+    case TLS_STATE_SERVER_FINISHED_SENT:
+        ret = tls_recv_finished(&ctx->handshake);
+        if (ret == TLS_HS_ERR_OK)
+            ret = tls13_derive_application_keys(&ctx->handshake);
+        if (ret == TLS_HS_ERR_OK)
+            ctx->handshake.state = TLS_STATE_CONNECTED;
         break;
     case TLS_STATE_CLIENT_HELLO_SENT:
         ret = tls_recv_server_hello(&ctx->handshake);
@@ -748,6 +890,9 @@ int rintls_handshake_step(rintls_ctx* ctx)
         break;
     case TLS_HS_ERR_TRUST:
         ctx->last_error = RINTLS_ERR_TRUST;
+        break;
+    case TLS_HS_ERR_WANT_CREDENTIALS:
+        ctx->last_error = RINTLS_ERR_WANT_CREDENTIALS;
         break;
     case TLS_HS_ERR_VERIFY:
         ctx->last_error = RINTLS_ERR_HANDSHAKE;

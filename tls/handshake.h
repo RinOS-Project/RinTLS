@@ -119,7 +119,15 @@ typedef enum {
     TLS_STATE_FINISHED_RECEIVED,
     TLS_STATE_CONNECTED,
     TLS_STATE_CLOSED,
-    TLS_STATE_ERROR
+    TLS_STATE_ERROR,
+    /* Server-side TLS 1.3 states.  They are appended so the existing
+     * client-side state values remain stable for diagnostics and tests. */
+    TLS_STATE_SERVER_CLIENT_HELLO_RECEIVED,
+    TLS_STATE_SERVER_HELLO_SENT,
+    TLS_STATE_SERVER_ENCRYPTED_EXTENSIONS_SENT,
+    TLS_STATE_SERVER_CERTIFICATE_SENT,
+    TLS_STATE_SERVER_CERTIFICATE_VERIFY_SENT,
+    TLS_STATE_SERVER_FINISHED_SENT
 } tls_state_t;
 
 /* ═══════════════════════════════════════
@@ -151,10 +159,15 @@ typedef int (*tls_client_certificate_sign_func)(
     rin_size_t message_len, u8* signature, rin_size_t signature_capacity,
     rin_size_t* signature_len);
 
+/* Server certificate signing uses the same opaque-key boundary as client
+ * authentication.  The private key remains owned by the product provider. */
+typedef tls_client_certificate_sign_func tls_server_certificate_sign_func;
+
 typedef struct {
     /* 状態 */
     tls_state_t state;
     int is_tls13;
+    int is_server;
 
     /* RINTLS_OPT_VERIFY_NONE: 証明書チェーン/署名検証をスキップ */
     int verify_none;
@@ -271,6 +284,16 @@ typedef struct {
     rin_size_t client_certificate_authorities_len;
     int client_certificate_request_metadata_valid;
 
+    /* Server identity.  The certificate_list is TLS wire-format and the
+     * private key is never retained here; CertificateVerify calls the
+     * product-owned signer callback. */
+    u8* server_certificate_list;
+    rin_size_t server_certificate_list_len;
+    tls_server_certificate_sign_func server_certificate_sign;
+    void* server_certificate_sign_opaque;
+    u16 server_signature_scheme;
+    int server_certificate_configured;
+
     /* SNI */
     char server_name[256];
 
@@ -332,6 +355,16 @@ int tls_handshake_set_client_certificate_for_scheme(
     tls_client_certificate_sign_func signer, void* signer_opaque,
     u16 signature_scheme);
 
+int tls_handshake_set_server_certificate(
+    tls_handshake_ctx_t* ctx, const void* certificate_list,
+    rin_size_t certificate_list_len,
+    tls_server_certificate_sign_func signer, void* signer_opaque);
+int tls_handshake_set_server_certificate_for_scheme(
+    tls_handshake_ctx_t* ctx, const void* certificate_list,
+    rin_size_t certificate_list_len,
+    tls_server_certificate_sign_func signer, void* signer_opaque,
+    u16 signature_scheme);
+
 int tls_handshake_client_certificate_requested(const tls_handshake_ctx_t* ctx);
 int tls_handshake_get_client_certificate_request(
     const tls_handshake_ctx_t* ctx, const u8** signature_algorithms,
@@ -360,6 +393,13 @@ int tls_handshake_client(tls_handshake_ctx_t* ctx);
  * passed all bounds and extension checks. */
 int tls_parse_client_hello(tls_handshake_ctx_t* ctx,
                            const u8* message, rin_size_t message_len);
+
+/* Server-side TLS 1.3 state-machine steps. */
+int tls_recv_client_hello(tls_handshake_ctx_t* ctx);
+int tls_send_server_hello(tls_handshake_ctx_t* ctx);
+int tls_send_server_encrypted_extensions(tls_handshake_ctx_t* ctx);
+int tls_send_server_certificate(tls_handshake_ctx_t* ctx);
+int tls_send_server_certificate_verify(tls_handshake_ctx_t* ctx);
 
 /* ═══════════════════════════════════════
  * 個別メッセージ処理 (内部用)
@@ -456,5 +496,6 @@ int tls_compute_verify_data(tls_handshake_ctx_t* ctx, int is_client, u8* verify_
 #define TLS_HS_ERR_RANDOM            -12
 #define TLS_HS_ERR_HOSTNAME          -13
 #define TLS_HS_ERR_TRUST             -14
+#define TLS_HS_ERR_WANT_CREDENTIALS  -15
 
 #endif /* RINTLS_HANDSHAKE_H */
