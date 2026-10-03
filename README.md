@@ -19,6 +19,13 @@ CertificateRequest without `signature_algorithms` fail the handshake. The
 view's pointers remain owned by the TLS context. This parser contract does not
 provide an identity inventory, user selection UI, or a private key owner.
 
+The opaque client and server certificate signers are also failure-atomic at
+the TLS handshake boundary. If a signer fails, reports an empty or oversized
+signature, or if the pending handshake message cannot be staged, the bounded
+internal signature buffer is cleared before the operation returns. The public
+callback receives only the bounded transcript and output span; private key
+material remains with the caller-owned signer.
+
 ## Argon2id KDF boundary
 
 `crypto/argon2.h` exposes the versioned Argon2id v1.3 request contract used by

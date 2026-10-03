@@ -1004,8 +1004,10 @@ int tls_send_server_certificate_verify(tls_handshake_ctx_t* ctx)
             ctx->server_certificate_sign_opaque, ctx->server_signature_scheme,
             signed_data, signed_len, signature, sizeof(signature),
             &signature_len) != 0 || signature_len == 0u ||
-        signature_len > sizeof(signature))
+        signature_len > sizeof(signature)) {
+        rintls_secure_zero(signature, sizeof(signature));
         return TLS_HS_ERR_SIGNATURE;
+    }
 
     u8 msg[TLS_MAX_PENDING_HANDSHAKE_SEND];
     rin_size_t pos = 0u;
@@ -1145,8 +1147,10 @@ int tls_send_server_key_exchange(tls_handshake_ctx_t* ctx)
             ctx->server_certificate_sign_opaque, ctx->server_signature_scheme,
             signed_data, 64u + params_len, signature, sizeof(signature),
             &signature_len) != 0 || signature_len == 0u ||
-        signature_len > sizeof(signature))
+        signature_len > sizeof(signature)) {
+        rintls_secure_zero(signature, sizeof(signature));
         return TLS_HS_ERR_SIGNATURE;
+    }
 
     msg[pos++] = TLS_HS_SERVER_KEY_EXCHANGE;
     rin_size_t length_pos = pos;
@@ -2800,8 +2804,11 @@ int tls_send_client_certificate_verify(tls_handshake_ctx_t* ctx)
     int sign_result = ctx->client_certificate_sign(
         ctx->client_certificate_sign_opaque, ctx->client_signature_scheme,
         signed_data, signed_len, signature, sizeof(signature), &signature_len);
-    if (sign_result != 0 || signature_len == 0u || signature_len > sizeof(signature))
+    if (sign_result != 0 || signature_len == 0u ||
+        signature_len > sizeof(signature)) {
+        rintls_secure_zero(signature, sizeof(signature));
         return TLS_HS_ERR_SIGNATURE;
+    }
 
     u8 msg[TLS_MAX_PENDING_HANDSHAKE_SEND];
     rin_size_t pos = 0u;
