@@ -1316,6 +1316,195 @@ static int nist_curve_parameters(int curve, nist_curve_t* parameters)
     return ECDH_ERR_INVALID;
 }
 
+static rin_size_t nist_rfc6979_hash_size(int curve)
+{
+    return curve == ECDSA_CURVE_P384 ? HMAC_SHA384_SIZE :
+           curve == ECDSA_CURVE_P521 ? HMAC_SHA512_SIZE : 0u;
+}
+
+static void nist_rfc6979_hmac(int curve, u8* output,
+                              const u8* key, rin_size_t key_len,
+                              const u8* first, rin_size_t first_size,
+                              const u8* second, rin_size_t second_size,
+                              const u8* third, rin_size_t third_size,
+                              const u8* fourth, rin_size_t fourth_size)
+{
+    if (curve == ECDSA_CURVE_P384) {
+        hmac_sha384_ctx hmac;
+        hmac_sha384_init(&hmac, key, key_len);
+        if (first_size != 0u) hmac_sha384_update(&hmac, first, first_size);
+        if (second_size != 0u) hmac_sha384_update(&hmac, second, second_size);
+        if (third_size != 0u) hmac_sha384_update(&hmac, third, third_size);
+        if (fourth_size != 0u) hmac_sha384_update(&hmac, fourth, fourth_size);
+        hmac_sha384_final(&hmac, output);
+        rintls_secure_zero(&hmac, sizeof(hmac));
+    } else {
+        hmac_sha512_ctx hmac;
+        hmac_sha512_init(&hmac, key, key_len);
+        if (first_size != 0u) hmac_sha512_update(&hmac, first, first_size);
+        if (second_size != 0u) hmac_sha512_update(&hmac, second, second_size);
+        if (third_size != 0u) hmac_sha512_update(&hmac, third, third_size);
+        if (fourth_size != 0u) hmac_sha512_update(&hmac, fourth, fourth_size);
+        hmac_sha512_final(&hmac, output);
+        rintls_secure_zero(&hmac, sizeof(hmac));
+    }
+}
+
+static void nist_rfc6979_reject(int curve, u8* key, u8* value,
+                                rin_size_t hash_size)
+{
+    static const u8 zero = 0u;
+    u8 next_key[HMAC_SHA512_SIZE];
+    u8 next_value[HMAC_SHA512_SIZE];
+    nist_rfc6979_hmac(curve, next_key, key, hash_size,
+                      value, hash_size, &zero, 1u,
+                      NULL, 0u, NULL, 0u);
+    nist_rfc6979_hmac(curve, next_value, next_key, hash_size,
+                      value, hash_size, NULL, 0u,
+                      NULL, 0u, NULL, 0u);
+    rintls_memcpy(key, next_key, hash_size);
+    rintls_memcpy(value, next_value, hash_size);
+    rintls_secure_zero(next_key, sizeof(next_key));
+    rintls_secure_zero(next_value, sizeof(next_value));
+}
+
+/* Deterministic ECDSA for the NIST curves whose TLS schemes use SHA-384 or
+ * SHA-512. P-256 keeps the original specialized implementation above. */
+int ecdsa_nist_sign(int curve,
+                    u8* signature, rin_size_t signature_capacity,
+                    const u8* hash, rin_size_t hash_len,
+                    const u8* private_key, rin_size_t private_key_len)
+{
+    nist_curve_t parameters;
+    bignum_t private_value, hash_value, reduced_hash, order, prime;
+    bignum_t nonce, nonce_inverse, r, s, product, sum;
+    p256_point_t generator, nonce_point;
+    u8 key[HMAC_SHA512_SIZE];
+    u8 value[HMAC_SHA512_SIZE];
+    u8 hash_octets[ECDSA_MAX_POINT_SIZE / 2];
+    u8 candidate[ECDSA_MAX_POINT_SIZE / 2];
+    u8 block[HMAC_SHA512_SIZE];
+    u8 zero = 0u;
+    u8 one = 1u;
+    rin_size_t width = 0u;
+    rin_size_t hash_size = 0u;
+    rin_size_t candidate_size;
+    rin_size_t copy_size;
+    u32 attempts = 0u;
+    int result = ECDH_ERR_KEY;
+
+    if (signature != NULL && signature_capacity != 0u)
+        rintls_secure_zero(signature, signature_capacity);
+    rintls_memset(key, 0, sizeof(key));
+    rintls_memset(value, 0, sizeof(value));
+    rintls_memset(hash_octets, 0, sizeof(hash_octets));
+    rintls_memset(candidate, 0, sizeof(candidate));
+    rintls_memset(block, 0, sizeof(block));
+    if (!signature || !hash || !private_key ||
+        nist_curve_parameters(curve, &parameters) != ECDH_OK)
+        goto done;
+    width = parameters.coordinate_size;
+    hash_size = nist_rfc6979_hash_size(curve);
+    if (width == 0u || width > sizeof(candidate) || hash_size == 0u ||
+        hash_len != hash_size || private_key_len != width ||
+        signature_capacity < width * 2u)
+        goto done;
+
+    bn_from_bytes(&private_value, private_key, private_key_len);
+    bn_from_bytes(&order, parameters.n, width);
+    if (bn_is_zero(&private_value) || bn_cmp(&private_value, &order) >= 0)
+        goto done;
+    bn_from_bytes(&hash_value, hash, hash_len);
+    if (bn_mod(&reduced_hash, &hash_value, &order) != BIGNUM_OK ||
+        bn_to_bytes(&reduced_hash, hash_octets, width) != BIGNUM_OK)
+        goto done;
+
+    rintls_memset(key, 0, hash_size);
+    rintls_memset(value, 1, hash_size);
+    nist_rfc6979_hmac(curve, key, key, hash_size,
+                      value, hash_size, &zero, 1u,
+                      private_key, private_key_len,
+                      hash_octets, width);
+    nist_rfc6979_hmac(curve, value, key, hash_size,
+                      value, hash_size, NULL, 0u,
+                      NULL, 0u, NULL, 0u);
+    nist_rfc6979_hmac(curve, key, key, hash_size,
+                      value, hash_size, &one, 1u,
+                      private_key, private_key_len,
+                      hash_octets, width);
+    nist_rfc6979_hmac(curve, value, key, hash_size,
+                      value, hash_size, NULL, 0u,
+                      NULL, 0u, NULL, 0u);
+
+    bn_from_bytes(&prime, parameters.p, width);
+    bn_from_bytes(&generator.x, parameters.gx, width);
+    bn_from_bytes(&generator.y, parameters.gy, width);
+    generator.infinity = 0;
+    while (attempts++ < 128u) {
+        candidate_size = 0u;
+        while (candidate_size < width) {
+            nist_rfc6979_hmac(curve, block, key, hash_size,
+                              value, hash_size, NULL, 0u,
+                              NULL, 0u, NULL, 0u);
+            rintls_memcpy(value, block, hash_size);
+            copy_size = width - candidate_size;
+            if (copy_size > hash_size) copy_size = hash_size;
+            rintls_memcpy(candidate + candidate_size, value, copy_size);
+            candidate_size += copy_size;
+        }
+        if (curve == ECDSA_CURVE_P521) candidate[0] &= 0x01u;
+        bn_from_bytes(&nonce, candidate, width);
+        if (bn_is_zero(&nonce) || bn_cmp(&nonce, &order) >= 0) {
+            nist_rfc6979_reject(curve, key, value, hash_size);
+            continue;
+        }
+        p256_scalar_mult(&nonce_point, &nonce, &generator, &prime);
+        if (nonce_point.infinity ||
+            bn_mod(&r, &nonce_point.x, &order) != BIGNUM_OK ||
+            bn_is_zero(&r) ||
+            bn_mod_inv(&nonce_inverse, &nonce, &order) != BIGNUM_OK ||
+            bn_mod_mul(&product, &r, &private_value, &order) != BIGNUM_OK ||
+            bn_mod_add(&sum, &reduced_hash, &product, &order) != BIGNUM_OK ||
+            bn_mod_mul(&s, &nonce_inverse, &sum, &order) != BIGNUM_OK ||
+            bn_is_zero(&s)) {
+            nist_rfc6979_reject(curve, key, value, hash_size);
+            continue;
+        }
+        if (bn_to_bytes(&r, signature, width) != BIGNUM_OK ||
+            bn_to_bytes(&s, signature + width, width) != BIGNUM_OK) {
+            result = ECDH_ERR_INVALID;
+            goto done;
+        }
+        result = ECDH_OK;
+        goto done;
+    }
+
+done:
+    bn_clear(&private_value);
+    bn_clear(&hash_value);
+    bn_clear(&reduced_hash);
+    bn_clear(&order);
+    bn_clear(&prime);
+    bn_clear(&nonce);
+    bn_clear(&nonce_inverse);
+    bn_clear(&r);
+    bn_clear(&s);
+    bn_clear(&product);
+    bn_clear(&sum);
+    bn_clear(&generator.x);
+    bn_clear(&generator.y);
+    bn_clear(&nonce_point.x);
+    bn_clear(&nonce_point.y);
+    rintls_secure_zero(key, sizeof(key));
+    rintls_secure_zero(value, sizeof(value));
+    rintls_secure_zero(hash_octets, sizeof(hash_octets));
+    rintls_secure_zero(candidate, sizeof(candidate));
+    rintls_secure_zero(block, sizeof(block));
+    if (result != ECDH_OK && signature != NULL && signature_capacity != 0u)
+        rintls_secure_zero(signature, signature_capacity);
+    return result;
+}
+
 static int ecdsa_read_der_length(const u8** cursor, const u8* end,
                                  rin_size_t* length)
 {

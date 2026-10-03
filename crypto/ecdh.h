@@ -92,6 +92,15 @@ int ecdsa_p256_verify(const u8* signature, rin_size_t sig_len,
 int ecdsa_p256_sign(u8 signature[64], const u8 hash[32],
                     const u8 private_key[32]);
 
+/* Deterministic RFC 6979 ECDSA over the SHA-384/P-384 or SHA-512/P-521
+ * digest. The signature is fixed-width IEEE P1363 r || s. This primitive
+ * only performs the mathematical signing operation; ownership and release
+ * of private keys remain the responsibility of the caller. */
+int ecdsa_nist_sign(int curve,
+                    u8* signature, rin_size_t signature_capacity,
+                    const u8* hash, rin_size_t hash_len,
+                    const u8* private_key, rin_size_t private_key_len);
+
 /* Verify an ECDSA signature using an uncompressed NIST P-256/P-384/P-521 key. */
 int ecdsa_nist_verify(int curve,
                       const u8* signature, rin_size_t sig_len,

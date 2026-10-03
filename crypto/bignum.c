@@ -90,23 +90,31 @@ int bn_from_bytes(bignum_t* n, const u8* data, rin_size_t len)
 
 int bn_to_bytes(const bignum_t* n, u8* data, rin_size_t len)
 {
+    rin_size_t byte_len;
+    rin_size_t source_offset;
+    rin_size_t destination_offset;
+    rin_size_t copy_len;
+    rin_size_t index;
+
+    if (n == NULL || data == NULL) return BIGNUM_ERR_INVALID;
     rintls_memset(data, 0, len);
+    if (n->used == 0 || len == 0u) return BIGNUM_OK;
 
-    if (n->used == 0) return BIGNUM_OK;
-
-    /* リトルエンディアンからビッグエンディアンへ変換 */
-    rin_size_t byte_len = n->used * 4;
-    rin_size_t start = (len > byte_len) ? (len - byte_len) : 0;
-
-    for (rin_size_t i = 0; i < n->used && (start + (n->used - 1 - i) * 4) < len; i++) {
-        u32 limb = n->limbs[n->used - 1 - i];
-        rin_size_t pos = start + i * 4;
-
-        for (int j = 0; j < 4 && (pos + j) < len; j++) {
-            data[pos + j] = (u8)(limb >> (24 - 8 * j));
-        }
+    /* The most significant limb may be only partially occupied (for example,
+     * P-521 uses 66 bytes but 17 32-bit limbs occupy a 68-byte container).
+     * Select the least-significant bytes before converting each limb; the old
+     * loop truncated the low bytes whenever len was not a multiple of four. */
+    byte_len = n->used * 4u;
+    source_offset = byte_len > len ? byte_len - len : 0u;
+    destination_offset = len > byte_len ? len - byte_len : 0u;
+    copy_len = byte_len < len ? byte_len : len;
+    for (index = 0u; index < copy_len; ++index) {
+        rin_size_t source_position = source_offset + index;
+        rin_size_t limb_index = n->used - 1u - source_position / 4u;
+        rin_size_t byte_in_limb = source_position % 4u;
+        data[destination_offset + index] =
+            (u8)(n->limbs[limb_index] >> (24u - 8u * byte_in_limb));
     }
-
     return BIGNUM_OK;
 }
 
