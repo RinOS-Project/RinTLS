@@ -109,6 +109,7 @@ static inline void rintls_memzero(void* ptr, rin_size_t len) {
 /* tcp.c の RinTCPSocket* API を使用 */
 struct RinTCPSocket;  /* Forward declaration */
 typedef struct RinTCPSocket RinTCPSocket;
+typedef RinTCPSocket* rintls_socket_handle;
 
 extern int tcp_send(RinTCPSocket* sock, const void* buf, u32 size);
 extern int tcp_recv(RinTCPSocket* sock, void* buf, u32 size);
@@ -119,6 +120,7 @@ extern int tcp_close(RinTCPSocket* sock);
 #define rintls_tcp_close(sock)             tcp_close((RinTCPSocket*)(sock))
 #else
 /* Userspace - socket FD API */
+typedef int rintls_socket_handle;
 #if defined(RINTLS_HOST_LIBC)
 #include <sys/socket.h>
 #include <unistd.h>

@@ -1671,13 +1671,23 @@ const char* rintls_strerror(int error)
 
 /* ソケット用I/Oラッパー (カーネル統合用) */
 typedef struct {
-    int sock;
+    rintls_socket_handle sock;
 } socket_io_ctx;
+
+static int socket_handle_invalid(rintls_socket_handle sock)
+{
+#if RIN_FREESTANDING
+    return sock == NULL;
+#else
+    return sock < 0;
+#endif
+}
 
 static int socket_send(void* ctx, const u8* data, rin_size_t len)
 {
     socket_io_ctx* sctx = (socket_io_ctx*)ctx;
-    if (!sctx || sctx->sock < 0 || !data || len == 0) return RINTLS_ERR_IO;
+    if (!sctx || socket_handle_invalid(sctx->sock) || !data || len == 0)
+        return RINTLS_ERR_IO;
     {
         int ret = rintls_tcp_send(sctx->sock, data, len);
 #if !defined(RIN_FREESTANDING) || defined(RIN_USERSPACE)
@@ -1696,7 +1706,8 @@ static int socket_send(void* ctx, const u8* data, rin_size_t len)
 static int socket_recv(void* ctx, u8* data, rin_size_t len)
 {
     socket_io_ctx* sctx = (socket_io_ctx*)ctx;
-    if (!sctx || sctx->sock < 0 || !data || len == 0) return RINTLS_ERR_IO;
+    if (!sctx || socket_handle_invalid(sctx->sock) || !data || len == 0)
+        return RINTLS_ERR_IO;
     {
         int ret = rintls_tcp_recv(sctx->sock, data, len);
 #if !defined(RIN_FREESTANDING) || defined(RIN_USERSPACE)
@@ -1712,9 +1723,10 @@ static int socket_recv(void* ctx, u8* data, rin_size_t len)
     }
 }
 
-int rintls_connect(rintls_ctx* ctx, int sock, const char* hostname)
+int rintls_connect(rintls_ctx* ctx, rintls_socket_handle sock,
+                   const char* hostname)
 {
-    if (!ctx || sock < 0) return RINTLS_ERR_MEMORY;
+    if (!ctx || socket_handle_invalid(sock)) return RINTLS_ERR_MEMORY;
 
     rintls_release_owned_io(ctx);
 

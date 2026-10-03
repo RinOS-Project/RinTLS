@@ -575,12 +575,13 @@ const char* rintls_strerror(int error);
  * ソケットに対してTLS接続を確立
  * (I/Oコールバックを内部で設定)
  *
- * sock: ソケットディスクリプタ
+ * sock: プラットフォームのソケットハンドル
  * hostname: 接続先ホスト名
  *
  * 戻り値: RINTLS_OK で成功
  */
-int rintls_connect(rintls_ctx* ctx, int sock, const char* hostname);
+int rintls_connect(rintls_ctx* ctx, rintls_socket_handle sock,
+                   const char* hostname);
 
 #ifdef __cplusplus
 }
