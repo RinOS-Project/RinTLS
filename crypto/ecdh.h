@@ -101,6 +101,15 @@ int ecdsa_nist_sign(int curve,
                     const u8* hash, rin_size_t hash_len,
                     const u8* private_key, rin_size_t private_key_len);
 
+/* Derive an uncompressed NIST public point from a private scalar.  This is a
+ * mathematical primitive only; callers remain responsible for keeping the
+ * private scalar inside their ownership boundary. */
+int ecdsa_nist_public_from_private(int curve,
+                                   u8* public_key,
+                                   rin_size_t public_key_capacity,
+                                   const u8* private_key,
+                                   rin_size_t private_key_len);
+
 /* Verify an ECDSA signature using an uncompressed NIST P-256/P-384/P-521 key. */
 int ecdsa_nist_verify(int curve,
                       const u8* signature, rin_size_t sig_len,

@@ -1505,6 +1505,66 @@ done:
     return result;
 }
 
+int ecdsa_nist_public_from_private(int curve,
+                                   u8* public_key,
+                                   rin_size_t public_key_capacity,
+                                   const u8* private_key,
+                                   rin_size_t private_key_len)
+{
+    nist_curve_t parameters;
+    bignum_t private_value, order, prime;
+    p256_point_t generator, public_point;
+    rin_size_t width;
+    int result = ECDH_ERR_KEY;
+
+    if (public_key != NULL && public_key_capacity != 0u)
+        rintls_secure_zero(public_key, public_key_capacity);
+    if (!public_key || !private_key) goto done;
+
+    if (curve == ECDSA_CURVE_P256) {
+        if (public_key_capacity < P256_POINT_SIZE ||
+            private_key_len != P256_KEY_SIZE ||
+            p256_compute_public(public_key, private_key) != ECDH_OK)
+            goto done;
+        return ECDH_OK;
+    }
+    if (nist_curve_parameters(curve, &parameters) != ECDH_OK)
+        goto done;
+    width = parameters.coordinate_size;
+    if (width == 0u || public_key_capacity < 1u + width * 2u ||
+        private_key_len != width)
+        goto done;
+
+    bn_from_bytes(&private_value, private_key, private_key_len);
+    bn_from_bytes(&order, parameters.n, width);
+    if (bn_is_zero(&private_value) || bn_cmp(&private_value, &order) >= 0)
+        goto done;
+    bn_from_bytes(&prime, parameters.p, width);
+    bn_from_bytes(&generator.x, parameters.gx, width);
+    bn_from_bytes(&generator.y, parameters.gy, width);
+    generator.infinity = 0;
+    p256_scalar_mult(&public_point, &private_value, &generator, &prime);
+    if (public_point.infinity ||
+        bn_to_bytes(&public_point.x, public_key + 1u, width) != BIGNUM_OK ||
+        bn_to_bytes(&public_point.y, public_key + 1u + width, width) !=
+            BIGNUM_OK)
+        goto done;
+    public_key[0] = 0x04u;
+    result = ECDH_OK;
+
+done:
+    bn_clear(&private_value);
+    bn_clear(&order);
+    bn_clear(&prime);
+    bn_clear(&generator.x);
+    bn_clear(&generator.y);
+    bn_clear(&public_point.x);
+    bn_clear(&public_point.y);
+    if (result != ECDH_OK && public_key != NULL && public_key_capacity != 0u)
+        rintls_secure_zero(public_key, public_key_capacity);
+    return result;
+}
+
 static int ecdsa_read_der_length(const u8** cursor, const u8* end,
                                  rin_size_t* length)
 {
