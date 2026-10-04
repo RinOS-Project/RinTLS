@@ -8,7 +8,10 @@
 #include "../crypto/sha256.h"
 #include "../platform/rin_platform.h"
 
-#if defined(RIN_USERSPACE)
+#if defined(RINTLS_HOST_LIBC)
+#include <sys/time.h>
+#include <time.h>
+#elif defined(RIN_USERSPACE)
 #include "../../libc/time.h"
 #elif !defined(RIN_FREESTANDING)
 #include <time.h>

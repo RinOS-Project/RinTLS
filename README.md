@@ -26,6 +26,18 @@ internal signature buffer is cleared before the operation returns. The public
 callback receives only the bounded transcript and output span; private key
 material remains with the caller-owned signer.
 
+## Public TLS adapter sanitizer boundary
+
+The root `fuzz/rintls_fuzzer.c` target exercises the public context, hostname,
+protocol options, cipher-suite list, trust-anchor and bundle loaders, certificate
+views, callback I/O, handshake, record send/receive, and close paths with bounded
+caller-owned buffers. Its build links only the public RinTLS, TLS record/handshake,
+X.509, and crypto sources under this directory. It does not link the kernel,
+private keyring, certificate identity owner, or any private key material, so the
+generic callback adapter remains usable by ordinary applications. The
+`RINTLS_HOST_LIBC` build boundary selects the host time headers for hosted
+sanitizer runs; production userspace builds keep their normal RinOS libc owner.
+
 ## Argon2id KDF boundary
 
 `crypto/argon2.h` exposes the versioned Argon2id v1.3 request contract used by
