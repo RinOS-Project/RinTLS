@@ -10,6 +10,10 @@
 #include "../crypto/rsa.h"
 #include "../crypto/ecdh.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ═══════════════════════════════════════
  * 定数定義
  * ═══════════════════════════════════════ */
@@ -289,5 +293,9 @@ int x509_time_to_unix(const x509_time_t* time, u64* unix_time);
 
 /* 現在時刻を取得 */
 void x509_get_current_time(x509_time_t* time);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* RINTLS_X509_CERT_H */
