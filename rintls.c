@@ -754,7 +754,7 @@ int rintls_handshake(rintls_ctx* ctx)
 
 int rintls_handshake_step(rintls_ctx* ctx)
 {
-    int ret;
+    int ret = TLS_HS_ERR_UNEXPECTED;
 
     if (!ctx) return RINTLS_ERR_MEMORY;
     if (!ctx->send_func || !ctx->recv_func) return RINTLS_ERR_IO;
@@ -899,9 +899,6 @@ int rintls_handshake_step(rintls_ctx* ctx)
         ctx->last_error = RINTLS_ERR_CLOSED;
         return RINTLS_ERR_CLOSED;
     case TLS_STATE_ERROR:
-        ret = TLS_HS_ERR_UNEXPECTED;
-        break;
-    default:
         ret = TLS_HS_ERR_UNEXPECTED;
         break;
     }
