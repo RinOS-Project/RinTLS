@@ -52,7 +52,7 @@ static const u8 rcon[11] = {
 
 /* GF(2^8) multiplication for MixColumns */
 static u8 xtime(u8 x) {
-    return (x << 1) ^ (((x >> 7) & 1) * 0x1b);
+    return (u8)((x << 1) ^ (((x >> 7) & 1) * 0x1b));
 }
 
 static u8 mul(u8 a, u8 b) {
@@ -312,7 +312,7 @@ static void gcm_mult(u8* x, const u8* h) {
             /* v = v >> 1 in GF(2^128) */
             int carry = v[15] & 1;
             for (int k = 15; k > 0; k--) {
-                v[k] = (v[k] >> 1) | ((v[k-1] & 1) << 7);
+                v[k] = (u8)((v[k] >> 1) | ((v[k-1] & 1) << 7));
             }
             v[0] >>= 1;
             if (carry) v[0] ^= 0xe1;

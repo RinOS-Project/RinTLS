@@ -1108,7 +1108,7 @@ int ecdsa_sig_from_der(u8* r, u8* s, const u8* der, rin_size_t der_len)
     }
     if (r_len > 32) return ECDH_ERR_INVALID;
     rintls_memcpy(r + (32 - r_len), r_data, r_len);
-    p += (r_data - p) + r_len;
+    p = r_data + r_len;
 
     /* s INTEGER */
     if (p >= end || *p++ != 0x02) return ECDH_ERR_INVALID;

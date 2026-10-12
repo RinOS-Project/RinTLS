@@ -8,6 +8,7 @@
 #include "tls/handshake.h"
 #include "x509/cert.h"
 #include "platform/rin_platform.h"
+#include <limits.h>
 #if !defined(RIN_FREESTANDING) || defined(RIN_USERSPACE)
 #include "../libc/errno.h"
 #endif
@@ -894,6 +895,12 @@ int rintls_handshake_step(rintls_ctx* ctx)
     case TLS_STATE_CONNECTED:
         rintls_mark_connected(ctx);
         return RINTLS_OK;
+    case TLS_STATE_CLOSED:
+        ctx->last_error = RINTLS_ERR_CLOSED;
+        return RINTLS_ERR_CLOSED;
+    case TLS_STATE_ERROR:
+        ret = TLS_HS_ERR_UNEXPECTED;
+        break;
     default:
         ret = TLS_HS_ERR_UNEXPECTED;
         break;
@@ -1689,7 +1696,9 @@ static int socket_send(void* ctx, const u8* data, rin_size_t len)
     if (!sctx || socket_handle_invalid(sctx->sock) || !data || len == 0)
         return RINTLS_ERR_IO;
     {
-        int ret = rintls_tcp_send(sctx->sock, data, len);
+        ssize_t result = rintls_tcp_send(sctx->sock, data, len);
+        if (result > INT_MAX || result < INT_MIN) return RINTLS_ERR_IO;
+        int ret = (int)result;
 #if !defined(RIN_FREESTANDING) || defined(RIN_USERSPACE)
         if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS)) {
             return TLS_ERR_WANT_WRITE;
@@ -1709,7 +1718,9 @@ static int socket_recv(void* ctx, u8* data, rin_size_t len)
     if (!sctx || socket_handle_invalid(sctx->sock) || !data || len == 0)
         return RINTLS_ERR_IO;
     {
-        int ret = rintls_tcp_recv(sctx->sock, data, len);
+        ssize_t result = rintls_tcp_recv(sctx->sock, data, len);
+        if (result > INT_MAX || result < INT_MIN) return RINTLS_ERR_IO;
+        int ret = (int)result;
 #if !defined(RIN_FREESTANDING) || defined(RIN_USERSPACE)
         if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS)) {
             return TLS_ERR_WANT_READ;

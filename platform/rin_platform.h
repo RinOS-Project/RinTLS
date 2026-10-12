@@ -76,6 +76,15 @@ static inline void rintls_memzero(void* ptr, rin_size_t len) {
 
 #else
 /* Userspace - use standard library */
+#if defined(__clang__) && defined(RIN_TARGET_RINOS)
+/* Keep compatibility diagnostics from RinOS libc local to this adapter when
+ * NativeAOT enables Clang's broader -Weverything warning set. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-qual"
+#pragma clang diagnostic ignored "-Wimplicit-int-conversion"
+#pragma clang diagnostic ignored "-Wc++-keyword"
+#pragma clang diagnostic ignored "-Wtautological-type-limit-compare"
+#endif
 #if defined(RINTLS_HOST_LIBC)
 #include <string.h>
 #include <stdlib.h>
@@ -290,5 +299,9 @@ static inline int rintls_secure_cmp(const u8* a, const u8* b, rin_size_t len) {
 #define RINTLS_ROTL32(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
 #define RINTLS_ROTR64(x, n) (((x) >> (n)) | ((x) << (64 - (n))))
 #define RINTLS_ROTL64(x, n) (((x) << (n)) | ((x) >> (64 - (n))))
+
+#if defined(__clang__) && defined(RIN_TARGET_RINOS) && !RIN_FREESTANDING
+#pragma clang diagnostic pop
+#endif
 
 #endif /* RINTLS_PLATFORM_H */
