@@ -25,14 +25,6 @@ static const u32 K256[64] = {
     0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
 };
 
-/* SHA-256 macros */
-#define CH(x, y, z)  (((x) & (y)) ^ (~(x) & (z)))
-#define MAJ(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
-#define EP0(x)       (RINTLS_ROTR32(x, 2) ^ RINTLS_ROTR32(x, 13) ^ RINTLS_ROTR32(x, 22))
-#define EP1(x)       (RINTLS_ROTR32(x, 6) ^ RINTLS_ROTR32(x, 11) ^ RINTLS_ROTR32(x, 25))
-#define SIG0(x)      (RINTLS_ROTR32(x, 7) ^ RINTLS_ROTR32(x, 18) ^ ((x) >> 3))
-#define SIG1(x)      (RINTLS_ROTR32(x, 17) ^ RINTLS_ROTR32(x, 19) ^ ((x) >> 10))
-
 static void sha256_transform(sha256_ctx* ctx, const u8* data) {
     /* volatile を使用してコンパイラ最適化による破壊を防止 */
     volatile u32 a, b, c, d, e, f, g, h, t1, t2;
