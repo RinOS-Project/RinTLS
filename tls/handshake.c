@@ -935,10 +935,72 @@ int tls_send_server_encrypted_extensions(tls_handshake_ctx_t* ctx)
         ctx, TLS_PENDING_SEND_SERVER_ENCRYPTED_EXTENSIONS);
 }
 
+int tls_send_server_certificate_request(tls_handshake_ctx_t* ctx)
+{
+    u8 msg[TLS_MAX_PENDING_HANDSHAKE_SEND];
+    rin_size_t pos = 0u;
+    static const u16 schemes[] = {
+        TLS_SIG_ECDSA_SECP256R1_SHA256,
+        TLS_SIG_ECDSA_SECP384R1_SHA384,
+        TLS_SIG_ECDSA_SECP521R1_SHA512,
+        TLS_SIG_RSA_PSS_RSAE_SHA256,
+        TLS_SIG_RSA_PSS_RSAE_SHA384,
+        TLS_SIG_RSA_PSS_RSAE_SHA512
+    };
+    rin_size_t scheme_count = 0u;
+    if (!ctx || !ctx->is_server || !ctx->is_tls13 ||
+        !ctx->server_client_certificate_required ||
+        ctx->state != TLS_STATE_SERVER_ENCRYPTED_EXTENSIONS_SENT)
+        return TLS_HS_ERR_UNEXPECTED;
+
+    msg[pos++] = TLS_HS_CERTIFICATE_REQUEST;
+    const rin_size_t length_pos = pos;
+    pos += 3u;
+    const rin_size_t body_start = pos;
+    msg[pos++] = 0u;
+    const rin_size_t extensions_length_pos = pos;
+    pos += 2u;
+    const rin_size_t extensions_start = pos;
+    write_u16(msg + pos, TLS_EXT_SIGNATURE_ALGORITHMS);
+    pos += 2u;
+    const rin_size_t extension_data_length_pos = pos;
+    pos += 2u;
+    const rin_size_t schemes_start = pos;
+    pos += 2u;
+    for (rin_size_t index = 0u; index < sizeof(schemes) / sizeof(schemes[0]); ++index) {
+        int offered = 0;
+        for (u16 peer = 0u; peer < ctx->peer_signature_scheme_count; ++peer) {
+            if (ctx->peer_signature_schemes[peer] == schemes[index]) {
+                offered = 1;
+                break;
+            }
+        }
+        if (!offered) continue;
+        if (pos > sizeof(msg) - 2u) return TLS_HS_ERR_CERTIFICATE;
+        write_u16(msg + pos, schemes[index]);
+        pos += 2u;
+        ++scheme_count;
+    }
+    if (scheme_count == 0u) return TLS_HS_ERR_SIGNATURE;
+    write_u16(msg + schemes_start, (u16)(scheme_count * 2u));
+    write_u16(msg + extension_data_length_pos,
+              (u16)(2u + scheme_count * 2u));
+    write_u16(msg + extensions_length_pos, (u16)(pos - extensions_start));
+    write_u24(msg + length_pos, (u32)(pos - body_start));
+    const int result = tls_handshake_stage_pending_send(
+        ctx, TLS_PENDING_SEND_SERVER_ENCRYPTED_EXTENSIONS, 1,
+        TLS_CONTENT_HANDSHAKE, TLS_VERSION_1_3, msg, pos, 1,
+        TLS_STATE_SERVER_CERTIFICATE_REQUEST_SENT);
+    if (result != TLS_HS_ERR_OK) return result;
+    return tls_handshake_flush_pending_send(
+        ctx, TLS_PENDING_SEND_SERVER_ENCRYPTED_EXTENSIONS);
+}
+
 int tls_send_server_certificate(tls_handshake_ctx_t* ctx)
 {
     if (!ctx || !ctx->is_server ||
-        ctx->state != TLS_STATE_SERVER_ENCRYPTED_EXTENSIONS_SENT ||
+        (ctx->state != TLS_STATE_SERVER_ENCRYPTED_EXTENSIONS_SENT &&
+         ctx->state != TLS_STATE_SERVER_CERTIFICATE_REQUEST_SENT) ||
         !ctx->server_certificate_list || ctx->server_certificate_list_len < 3u)
         return TLS_HS_ERR_CERTIFICATE;
     u8 msg[TLS_MAX_PENDING_HANDSHAKE_SEND];
@@ -1386,7 +1448,8 @@ int tls_handshake_set_client_certificate(
     if (!ctx || certificate_list_len > TLS_MAX_CLIENT_CERTIFICATE_CHAIN)
         return TLS_HS_ERR_CERTIFICATE;
     if ((ctx->state != TLS_STATE_INIT &&
-         ctx->state != TLS_STATE_CLIENT_CERTIFICATE) ||
+         ctx->state != TLS_STATE_CLIENT_CERTIFICATE &&
+         ctx->state != TLS_STATE_ENCRYPTED_EXTENSIONS) ||
         ctx->client_certificate_list || ctx->client_certificate_declined)
         return TLS_HS_ERR_UNEXPECTED;
 
@@ -1545,6 +1608,16 @@ int tls_handshake_set_server_certificate_for_scheme(
     if (result == TLS_HS_ERR_OK)
         ctx->server_signature_scheme = signature_scheme;
     return result;
+}
+
+int tls_handshake_set_server_client_certificate_required(
+    tls_handshake_ctx_t* ctx, int required)
+{
+    if (!ctx || ctx->state != TLS_STATE_INIT || !ctx->is_server ||
+        (required != 0 && required != 1))
+        return TLS_HS_ERR_CERTIFICATE;
+    ctx->server_client_certificate_required = required;
+    return TLS_HS_ERR_OK;
 }
 
 int tls_handshake_set_client_certificate_for_scheme(
@@ -2723,7 +2796,11 @@ int tls_recv_certificate_request(tls_handshake_ctx_t* ctx,
         ctx->state = TLS_STATE_ERROR;
         return TLS_HS_ERR_CERTIFICATE;
     }
-    ctx->state = TLS_STATE_CLIENT_CERTIFICATE;
+    /* TLS 1.3 sends the client Certificate/CertificateVerify only after the
+     * client has received the server Certificate, CertificateVerify, and
+     * Finished.  Keep the request recorded while receiving that server
+     * flight. */
+    ctx->state = TLS_STATE_ENCRYPTED_EXTENSIONS;
     return TLS_HS_ERR_OK;
 }
 
@@ -2826,7 +2903,7 @@ int tls_send_client_certificate_verify(tls_handshake_ctx_t* ctx)
     int ret = tls_handshake_stage_pending_send(
         ctx, TLS_PENDING_SEND_CLIENT_CERTIFICATE_VERIFY, ctx->is_tls13,
         TLS_CONTENT_HANDSHAKE, ctx->version, msg, pos, 1,
-        TLS_STATE_ENCRYPTED_EXTENSIONS);
+        TLS_STATE_CLIENT_CERTIFICATE_FINISHED);
     if (ret != TLS_HS_ERR_OK) return ret;
     return tls_handshake_flush_pending_send(
         ctx, TLS_PENDING_SEND_CLIENT_CERTIFICATE_VERIFY);
@@ -2978,7 +3055,7 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
         }
 
         if (cert_index == 0) {
-            if (ctx->server_name[0] != '\0' &&
+            if (!ctx->is_server && ctx->server_name[0] != '\0' &&
                 x509_check_hostname(cur, ctx->server_name) != X509_OK) {
                 rintls_debug("[TLS] Certificate hostname mismatch\n");
                 chain_err = TLS_HS_ERR_HOSTNAME;
@@ -3044,7 +3121,9 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
     write_u32_le(ctx->peer_certificate_chain,
                  ctx->peer_certificate_chain_count);
 
-    ctx->state = TLS_STATE_CERTIFICATE_RECEIVED;
+    ctx->state = ctx->is_server
+        ? TLS_STATE_SERVER_CLIENT_CERTIFICATE_RECEIVED
+        : TLS_STATE_CERTIFICATE_RECEIVED;
     return TLS_HS_ERR_OK;
 }
 
@@ -3087,13 +3166,19 @@ int tls_recv_certificate_verify(tls_handshake_ctx_t* ctx)
     int verify_ok = ctx->verify_none;
 
     if (!verify_ok) {
-        static const u8 ctx_str[] = "TLS 1.3, server CertificateVerify";
-        u8 signed_data[64 + sizeof(ctx_str) - 1 + 1 + 48];
+        static const u8 server_ctx_str[] =
+            "TLS 1.3, server CertificateVerify";
+        static const u8 client_ctx_str[] =
+            "TLS 1.3, client CertificateVerify";
+        const u8* ctx_str = ctx->is_server ? client_ctx_str : server_ctx_str;
+        const rin_size_t ctx_str_len = ctx->is_server
+            ? sizeof(client_ctx_str) - 1u : sizeof(server_ctx_str) - 1u;
+        u8 signed_data[64 + sizeof(server_ctx_str) - 1 + 1 + 48];
         rin_size_t pos = 64;
 
         rintls_memset(signed_data, 0x20, 64);
-        rintls_memcpy(signed_data + pos, ctx_str, sizeof(ctx_str) - 1);
-        pos += sizeof(ctx_str) - 1;
+        rintls_memcpy(signed_data + pos, ctx_str, ctx_str_len);
+        pos += ctx_str_len;
         signed_data[pos++] = 0x00;
         rintls_memcpy(signed_data + pos, transcript_hash, hash_len);
         pos += hash_len;
@@ -3152,7 +3237,9 @@ int tls_recv_certificate_verify(tls_handshake_ctx_t* ctx)
         return TLS_HS_ERR_SIGNATURE;
     }
 
-    ctx->state = TLS_STATE_CERTIFICATE_VERIFY;
+    ctx->state = ctx->is_server
+        ? TLS_STATE_SERVER_CLIENT_CERTIFICATE_VERIFY_RECEIVED
+        : TLS_STATE_CERTIFICATE_VERIFY;
     return TLS_HS_ERR_OK;
 }
 
@@ -3337,7 +3424,9 @@ int tls_send_finished(tls_handshake_ctx_t* ctx)
                                                pos,
                                                1,
                                                ctx->is_server
-                                                   ? TLS_STATE_SERVER_FINISHED_SENT
+                                                   ? (ctx->server_client_certificate_required
+                                                      ? TLS_STATE_SERVER_WAIT_CLIENT_CERTIFICATE
+                                                      : TLS_STATE_SERVER_FINISHED_SENT)
                                                    : TLS_STATE_FINISHED_SENT);
     if (ret != TLS_HS_ERR_OK) {
         return ret;

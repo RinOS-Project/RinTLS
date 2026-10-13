@@ -111,6 +111,7 @@ typedef enum {
     TLS_STATE_CERTIFICATE_VERIFY,       /* TLS 1.3 */
     TLS_STATE_CLIENT_CERTIFICATE,       /* TLS 1.3 mutual authentication */
     TLS_STATE_CLIENT_CERTIFICATE_VERIFY,
+    TLS_STATE_CLIENT_CERTIFICATE_FINISHED,
     TLS_STATE_SERVER_KEY_EXCHANGE,      /* TLS 1.2 */
     TLS_STATE_SERVER_HELLO_DONE,        /* TLS 1.2 */
     TLS_STATE_CLIENT_KEY_EXCHANGE_SENT, /* TLS 1.2 */
@@ -125,9 +126,13 @@ typedef enum {
     TLS_STATE_SERVER_CLIENT_HELLO_RECEIVED,
     TLS_STATE_SERVER_HELLO_SENT,
     TLS_STATE_SERVER_ENCRYPTED_EXTENSIONS_SENT,
+    TLS_STATE_SERVER_CERTIFICATE_REQUEST_SENT,
     TLS_STATE_SERVER_CERTIFICATE_SENT,
     TLS_STATE_SERVER_CERTIFICATE_VERIFY_SENT,
     TLS_STATE_SERVER_FINISHED_SENT,
+    TLS_STATE_SERVER_WAIT_CLIENT_CERTIFICATE,
+    TLS_STATE_SERVER_CLIENT_CERTIFICATE_RECEIVED,
+    TLS_STATE_SERVER_CLIENT_CERTIFICATE_VERIFY_RECEIVED,
     TLS_STATE_SERVER_TLS12_CERTIFICATE_SENT,
     TLS_STATE_SERVER_TLS12_KEY_EXCHANGE_SENT,
     TLS_STATE_SERVER_TLS12_HELLO_DONE_SENT,
@@ -304,6 +309,7 @@ typedef struct {
     void* server_certificate_sign_opaque;
     u16 server_signature_scheme;
     int server_certificate_configured;
+    int server_client_certificate_required;
 
     /* SNI */
     char server_name[256];
@@ -379,6 +385,9 @@ int tls_handshake_set_server_certificate_for_scheme(
     tls_server_certificate_sign_func signer, void* signer_opaque,
     u16 signature_scheme);
 
+int tls_handshake_set_server_client_certificate_required(
+    tls_handshake_ctx_t* ctx, int required);
+
 int tls_handshake_client_certificate_requested(const tls_handshake_ctx_t* ctx);
 int tls_handshake_get_client_certificate_request(
     const tls_handshake_ctx_t* ctx, const u8** signature_algorithms,
@@ -412,6 +421,7 @@ int tls_parse_client_hello(tls_handshake_ctx_t* ctx,
 int tls_recv_client_hello(tls_handshake_ctx_t* ctx);
 int tls_send_server_hello(tls_handshake_ctx_t* ctx);
 int tls_send_server_encrypted_extensions(tls_handshake_ctx_t* ctx);
+int tls_send_server_certificate_request(tls_handshake_ctx_t* ctx);
 int tls_send_server_certificate(tls_handshake_ctx_t* ctx);
 int tls_send_server_certificate_verify(tls_handshake_ctx_t* ctx);
 int tls_send_server_certificate_tls12(tls_handshake_ctx_t* ctx);

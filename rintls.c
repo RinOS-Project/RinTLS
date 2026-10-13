@@ -291,7 +291,8 @@ int rintls_set_client_certificate(
      * during initial configuration. This is the only post-start mutation
      * allowed by the handshake state machine. */
     if (ctx->handshake_started &&
-        ctx->handshake.state != TLS_STATE_CLIENT_CERTIFICATE)
+        ctx->handshake.state != TLS_STATE_CLIENT_CERTIFICATE &&
+        ctx->handshake.state != TLS_STATE_ENCRYPTED_EXTENSIONS)
         return RINTLS_ERR_HANDSHAKE;
     int result = tls_handshake_set_client_certificate(
         &ctx->handshake, certificate_list, certificate_list_len,
@@ -313,7 +314,8 @@ int rintls_set_client_certificate_for_scheme(
 {
     if (!ctx) return RINTLS_ERR_MEMORY;
     if (!ctx->handshake_started ||
-        ctx->handshake.state != TLS_STATE_CLIENT_CERTIFICATE)
+        (ctx->handshake.state != TLS_STATE_CLIENT_CERTIFICATE &&
+         ctx->handshake.state != TLS_STATE_ENCRYPTED_EXTENSIONS))
         return RINTLS_ERR_HANDSHAKE;
     int result = tls_handshake_set_client_certificate_for_scheme(
         &ctx->handshake, certificate_list, certificate_list_len,
@@ -401,6 +403,18 @@ int rintls_set_server_certificate_provider(
     ctx->server_certificate_provider_opaque = provider_opaque;
     ctx->server_certificate_provider_called = 0;
     return RINTLS_OK;
+}
+
+int rintls_set_server_client_certificate_required(
+    rintls_ctx* ctx, int required)
+{
+    if (!ctx) return RINTLS_ERR_MEMORY;
+    if ((ctx->options & RINTLS_OPT_SERVER) == 0u ||
+        ctx->handshake_started || (required != 0 && required != 1))
+        return RINTLS_ERR_HANDSHAKE;
+    return tls_handshake_set_server_client_certificate_required(
+               &ctx->handshake, required) == TLS_HS_ERR_OK
+        ? RINTLS_OK : RINTLS_ERR_CERTIFICATE;
 }
 
 int rintls_get_server_client_hello(
@@ -679,7 +693,8 @@ static void rintls_mark_connected(rintls_ctx* ctx)
 {
     ctx->connected = 1;
     ctx->peer_verified =
-        ctx->handshake.verify_none == 0 && ctx->hostname[0] != '\0' &&
+        ctx->handshake.verify_none == 0 &&
+        (ctx->handshake.is_server || ctx->hostname[0] != '\0') &&
         ctx->trusted_unix_time != 0u &&
         rintls_trust_anchor_count(ctx) != 0u &&
         ctx->handshake.server_cert != RIN_NULL &&
@@ -776,6 +791,11 @@ int rintls_handshake_step(rintls_ctx* ctx)
             : tls_send_server_certificate_tls12(&ctx->handshake);
         break;
     case TLS_STATE_SERVER_ENCRYPTED_EXTENSIONS_SENT:
+        ret = ctx->handshake.server_client_certificate_required
+            ? tls_send_server_certificate_request(&ctx->handshake)
+            : tls_send_server_certificate(&ctx->handshake);
+        break;
+    case TLS_STATE_SERVER_CERTIFICATE_REQUEST_SENT:
         ret = tls_send_server_certificate(&ctx->handshake);
         break;
     case TLS_STATE_SERVER_CERTIFICATE_SENT:
@@ -795,6 +815,19 @@ int rintls_handshake_step(rintls_ctx* ctx)
             ctx->handshake.state = TLS_STATE_CONNECTED;
             ret = TLS_HS_ERR_OK;
         }
+        break;
+    case TLS_STATE_SERVER_WAIT_CLIENT_CERTIFICATE:
+        ret = tls_recv_certificate(&ctx->handshake);
+        break;
+    case TLS_STATE_SERVER_CLIENT_CERTIFICATE_RECEIVED:
+        ret = tls_recv_certificate_verify(&ctx->handshake);
+        break;
+    case TLS_STATE_SERVER_CLIENT_CERTIFICATE_VERIFY_RECEIVED:
+        ret = tls_recv_finished(&ctx->handshake);
+        if (ret == TLS_HS_ERR_OK)
+            ret = tls13_derive_application_keys(&ctx->handshake);
+        if (ret == TLS_HS_ERR_OK)
+            ctx->handshake.state = TLS_STATE_CONNECTED;
         break;
     case TLS_STATE_SERVER_TLS12_CERTIFICATE_SENT:
         ret = tls_send_server_key_exchange(&ctx->handshake);
@@ -842,6 +875,9 @@ int rintls_handshake_step(rintls_ctx* ctx)
     case TLS_STATE_CLIENT_CERTIFICATE_VERIFY:
         ret = tls_send_client_certificate_verify(&ctx->handshake);
         break;
+    case TLS_STATE_CLIENT_CERTIFICATE_FINISHED:
+        ret = tls_send_change_cipher_spec(&ctx->handshake);
+        break;
     case TLS_STATE_CERTIFICATE_RECEIVED:
         ret = ctx->handshake.is_tls13
             ? tls_recv_certificate_verify(&ctx->handshake)
@@ -849,6 +885,10 @@ int rintls_handshake_step(rintls_ctx* ctx)
         break;
     case TLS_STATE_CERTIFICATE_VERIFY:
         ret = tls_recv_finished(&ctx->handshake);
+        if (ret == TLS_HS_ERR_OK &&
+            ctx->handshake.client_certificate_requested &&
+            !ctx->handshake.is_server)
+            ctx->handshake.state = TLS_STATE_CLIENT_CERTIFICATE;
         break;
     case TLS_STATE_SERVER_KEY_EXCHANGE:
         ret = tls_recv_server_hello_done(&ctx->handshake);

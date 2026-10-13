@@ -364,6 +364,8 @@ int rintls_set_server_certificate_for_scheme(
 int rintls_set_server_certificate_provider(
     rintls_ctx* ctx, rintls_server_certificate_provider_func provider,
     void* provider_opaque);
+int rintls_set_server_client_certificate_required(
+    rintls_ctx* ctx, int required);
 int rintls_get_server_client_hello(
     const rintls_ctx* ctx, rintls_server_client_hello* client_hello);
 
