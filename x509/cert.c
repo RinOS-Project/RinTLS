@@ -9,8 +9,12 @@
 #include "../platform/rin_platform.h"
 
 #if defined(RINTLS_HOST_LIBC)
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/time.h>
 #include <time.h>
+#endif
 #elif defined(RIN_USERSPACE)
 #include "../../libc/time.h"
 #elif !defined(RIN_FREESTANDING)
@@ -1312,6 +1316,21 @@ void x509_get_current_time(x509_time_t* time)
     if (!time) return;
 
 #if defined(RIN_USERSPACE) || !defined(RIN_FREESTANDING)
+#if defined(RINTLS_HOST_LIBC) && defined(_WIN32)
+    FILETIME file_time;
+    SYSTEMTIME utc;
+    if (!GetSystemTimeAsFileTime(&file_time) ||
+        !FileTimeToSystemTime(&file_time, &utc)) {
+        rintls_memset(time, 0, sizeof(*time));
+        return;
+    }
+    time->year = utc.wYear;
+    time->month = utc.wMonth;
+    time->day = utc.wDay;
+    time->hour = utc.wHour;
+    time->minute = utc.wMinute;
+    time->second = utc.wSecond;
+#else
     struct timeval now;
     struct tm utc;
 
@@ -1327,6 +1346,7 @@ void x509_get_current_time(x509_time_t* time)
     time->hour = utc.tm_hour;
     time->minute = utc.tm_min;
     time->second = utc.tm_sec;
+#endif
 #else
     /* Kernel TLS has no trusted realtime source configured yet. */
     rintls_memset(time, 0, sizeof(*time));

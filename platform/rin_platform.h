@@ -149,13 +149,20 @@ extern int rin_get_random_bytes(void* buf, u32 len);
 
 static inline int rintls_get_random(u8* buf, rin_size_t len) {
     if (!buf && len) return -1;
-    return rin_get_random_bytes(buf, (u32)len);
+    if (len > 0xffffffffu) return -1;
+    if (rin_get_random_bytes(buf, (u32)len) != 0) {
+        rintls_memzero(buf, len);
+        return -1;
+    }
+    return 0;
 }
 #else
 #if defined(RINTLS_HOST_LIBC)
 #ifdef _WIN32
-/* No insecure PRNG fallback: host embedders must provide OS randomness. */
+#include <windows.h>
+#include <bcrypt.h>
 #else
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #endif
@@ -167,17 +174,35 @@ static inline int rintls_get_random(u8* buf, rin_size_t len) {
     if (!buf && len) return -1;
 #if defined(RINTLS_HOST_LIBC)
 #ifdef _WIN32
-    (void)buf;
-    (void)len;
-    return -1;
+    rin_size_t offset = 0;
+    while (offset < len) {
+        const rin_size_t remaining = len - offset;
+        const ULONG chunk = remaining > (rin_size_t)0xffffffffu
+            ? 0xffffffffu : (ULONG)remaining;
+        if (BCryptGenRandom(NULL, buf + offset, chunk,
+                            BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+        {
+            rintls_memzero(buf, len);
+            return -1;
+        }
+        offset += (rin_size_t)chunk;
+    }
+    return 0;
 #else
     int fd = open("/dev/urandom", O_RDONLY);
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        rintls_memzero(buf, len);
+        return -1;
+    }
     rin_size_t off = 0;
+    unsigned interrupted = 0;
     while (off < len) {
-        int n = (int)read(fd, buf + off, (size_t)(len - off));
-        if (n <= 0) {
+        ssize_t n = read(fd, buf + off, (size_t)(len - off));
+        if (n < 0 && errno == EINTR && ++interrupted < 32u) continue;
+        interrupted = 0;
+        if (n <= 0 || (rin_size_t)n > len - off) {
             close(fd);
+            rintls_memzero(buf, len);
             return -1;
         }
         off += (rin_size_t)n;
@@ -187,12 +212,18 @@ static inline int rintls_get_random(u8* buf, rin_size_t len) {
 #endif
 #else
     rin_size_t off = 0;
+    unsigned interrupted = 0;
     while (off < len) {
         ssize_t n = getrandom(buf + off, len - off, 0);
         /* A short read is valid for getrandom().  Never expose partially
          * initialized key material: complete it or fail closed. */
+        if (n < 0 && errno == EINTR && ++interrupted < 32u) continue;
+        interrupted = 0;
         if (n <= 0)
+        {
+            rintls_memzero(buf, len);
             return -1;
+        }
         off += (rin_size_t)n;
     }
     return 0;
