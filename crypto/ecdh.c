@@ -5,6 +5,7 @@
 
 #include "ecdh.h"
 #include "bignum.h"
+#include "p256_ct.h"
 #include "hmac.h"
 #include "../platform/rin_platform.h"
 
@@ -631,17 +632,21 @@ static void p256_get_n(bignum_t* n)
 
 int p256_validate_private(const u8* private_key, rin_size_t len)
 {
-    bignum_t private_value;
-    bignum_t order;
-    int valid;
+    u32 less = 0u;
+    u32 greater = 0u;
+    u32 nonzero = 0u;
+    rin_size_t index;
     if (!private_key || len != P256_KEY_SIZE) return ECDH_ERR_INVALID;
-    bn_from_bytes(&private_value, private_key, P256_KEY_SIZE);
-    p256_get_n(&order);
-    valid = !bn_is_zero(&private_value) &&
-            bn_cmp(&private_value, &order) < 0;
-    bn_clear(&private_value);
-    bn_clear(&order);
-    return valid ? ECDH_OK : ECDH_ERR_KEY;
+    for (index = 0u; index < P256_KEY_SIZE; ++index) {
+        u32 value = private_key[index];
+        u32 order = P256_N[index];
+        u32 undecided = (less | greater) ^ 1u;
+        less |= (((value - order) >> 31) & 1u) & undecided;
+        greater |= (((order - value) >> 31) & 1u) & undecided;
+        nonzero |= value;
+    }
+    return (less & ((nonzero | (0u - nonzero)) >> 31)) != 0u
+        ? ECDH_OK : ECDH_ERR_KEY;
 }
 
 /* 点のダブリング: R = 2P */
@@ -737,6 +742,16 @@ static void p256_add(p256_point_t* r, const p256_point_t* p, const p256_point_t*
 /* スカラー乗算: R = k * P */
 static void p256_scalar_mult(p256_point_t* r, const bignum_t* k, const p256_point_t* p, const bignum_t* prime)
 {
+    bignum_t p256_prime;
+    p256_get_p(&p256_prime);
+    if (bn_cmp(prime, &p256_prime) == 0) {
+        p256_ct_scalar_mult(&r->x, &r->y, &r->infinity,
+                            k, &p->x, &p->y, p->infinity);
+        bn_clear(&p256_prime);
+        return;
+    }
+    bn_clear(&p256_prime);
+
     p256_point_t result, temp;
     result.infinity = 1;
     bn_copy(&temp.x, &p->x);
@@ -764,6 +779,7 @@ int p256_keygen(p256_keypair_t* keypair)
     u32 attempts = 0;
 
     if (!keypair) return ECDH_ERR_INVALID;
+    rintls_secure_zero(keypair, sizeof(*keypair));
 
     p256_get_p(&prime);
     p256_get_n(&n);
@@ -777,9 +793,7 @@ int p256_keygen(p256_keypair_t* keypair)
     do {
         if (attempts++ >= 128 ||
             rintls_random_bytes(keypair->private_key, 32) != 0) {
-            bn_clear(&k);
-            rintls_secure_zero(keypair, sizeof(*keypair));
-            return ECDH_ERR_KEY;
+            goto keygen_failed;
         }
         bn_from_bytes(&k, keypair->private_key, 32);
     } while (bn_is_zero(&k) || bn_cmp(&k, &n) >= 0);
@@ -789,20 +803,42 @@ int p256_keygen(p256_keypair_t* keypair)
 
     /* 公開鍵をエンコード (非圧縮形式) */
     keypair->public_key[0] = 0x04;
-    bn_to_bytes(&Q.x, keypair->public_key + 1, 32);
-    bn_to_bytes(&Q.y, keypair->public_key + 33, 32);
+    if (bn_to_bytes(&Q.x, keypair->public_key + 1, 32) != BIGNUM_OK ||
+        bn_to_bytes(&Q.y, keypair->public_key + 33, 32) != BIGNUM_OK ||
+        Q.infinity) {
+        goto keygen_failed;
+    }
 
     bn_clear(&k);
+    bn_clear(&n);
+    bn_clear(&prime);
+    bn_clear(&G.x);
+    bn_clear(&G.y);
+    bn_clear(&Q.x);
+    bn_clear(&Q.y);
     return ECDH_OK;
+
+keygen_failed:
+    bn_clear(&k);
+    bn_clear(&n);
+    bn_clear(&prime);
+    bn_clear(&G.x);
+    bn_clear(&G.y);
+    bn_clear(&Q.x);
+    bn_clear(&Q.y);
+    rintls_secure_zero(keypair, sizeof(*keypair));
+    return ECDH_ERR_KEY;
 }
 
 int p256_compute_public(u8* public_key, const u8* private_key)
 {
     bignum_t k, prime;
     p256_point_t G, Q;
+    int status = ECDH_ERR_KEY;
 
-    if (!public_key ||
-        p256_validate_private(private_key, P256_KEY_SIZE) != ECDH_OK)
+    if (!public_key) return ECDH_ERR_INVALID;
+    rintls_secure_zero(public_key, P256_POINT_SIZE);
+    if (p256_validate_private(private_key, P256_KEY_SIZE) != ECDH_OK)
         return ECDH_ERR_KEY;
 
     p256_get_p(&prime);
@@ -815,23 +851,36 @@ int p256_compute_public(u8* public_key, const u8* private_key)
 
     p256_scalar_mult(&Q, &k, &G, &prime);
 
-    public_key[0] = 0x04;
-    bn_to_bytes(&Q.x, public_key + 1, 32);
-    bn_to_bytes(&Q.y, public_key + 33, 32);
+    if (!Q.infinity &&
+        bn_to_bytes(&Q.x, public_key + 1, 32) == BIGNUM_OK &&
+        bn_to_bytes(&Q.y, public_key + 33, 32) == BIGNUM_OK) {
+        public_key[0] = 0x04;
+        status = ECDH_OK;
+    } else {
+        rintls_secure_zero(public_key, P256_POINT_SIZE);
+    }
 
     bn_clear(&k);
-    return ECDH_OK;
+    bn_clear(&prime);
+    bn_clear(&G.x);
+    bn_clear(&G.y);
+    bn_clear(&Q.x);
+    bn_clear(&Q.y);
+    return status;
 }
 
 int p256_validate_public(const u8* public_key, rin_size_t len)
 {
-    if (len == 65 && public_key[0] == 0x04) {
+    if (!public_key) return ECDH_ERR_INVALID;
+    if (len == P256_POINT_SIZE && public_key[0] == 0x04) {
         /* 非圧縮形式 - 点が曲線上にあるか検証 */
         bignum_t x, y, prime, lhs, rhs, t;
 
         p256_get_p(&prime);
         bn_from_bytes(&x, public_key + 1, 32);
         bn_from_bytes(&y, public_key + 33, 32);
+        if (bn_cmp(&x, &prime) >= 0 || bn_cmp(&y, &prime) >= 0)
+            return ECDH_ERR_POINT;
 
         /* y^2 = x^3 - 3x + b (mod p) */
         bn_mod_mul(&lhs, &y, &y, &prime);  /* y^2 */
@@ -858,9 +907,6 @@ int p256_validate_public(const u8* public_key, rin_size_t len)
         if (bn_cmp(&lhs, &rhs) == 0) {
             return ECDH_OK;
         }
-    } else if (len == 33 && (public_key[0] == 0x02 || public_key[0] == 0x03)) {
-        /* 圧縮形式 - 基本検証のみ */
-        return ECDH_OK;
     }
 
     return ECDH_ERR_POINT;
@@ -870,6 +916,11 @@ int p256_ecdh(u8* shared_secret,
               const u8* private_key,
               const u8* peer_public, rin_size_t peer_public_len)
 {
+    int status = ECDH_ERR_POINT;
+    if (!shared_secret) return ECDH_ERR_INVALID;
+    rintls_secure_zero(shared_secret, P256_KEY_SIZE);
+    if (p256_validate_private(private_key, P256_KEY_SIZE) != ECDH_OK)
+        return ECDH_ERR_KEY;
     if (p256_validate_public(peer_public, peer_public_len) != ECDH_OK) {
         return ECDH_ERR_POINT;
     }
@@ -880,27 +931,31 @@ int p256_ecdh(u8* shared_secret,
     p256_get_p(&prime);
     bn_from_bytes(&k, private_key, 32);
 
-    /* 相手の公開鍵をパース */
-    if (peer_public[0] == 0x04 && peer_public_len == 65) {
-        bn_from_bytes(&Q.x, peer_public + 1, 32);
-        bn_from_bytes(&Q.y, peer_public + 33, 32);
-        Q.infinity = 0;
-    } else {
-        return ECDH_ERR_POINT;  /* 圧縮形式は未サポート */
-    }
+    /* p256_validate_public admits only canonical uncompressed points. */
+    bn_from_bytes(&Q.x, peer_public + 1, 32);
+    bn_from_bytes(&Q.y, peer_public + 33, 32);
+    Q.infinity = 0;
 
     /* R = k * Q */
     p256_scalar_mult(&R, &k, &Q, &prime);
 
-    if (R.infinity) {
-        return ECDH_ERR_POINT;
-    }
+    if (R.infinity) goto out;
 
     /* 共有秘密はx座標 */
-    bn_to_bytes(&R.x, shared_secret, 32);
+    if (bn_to_bytes(&R.x, shared_secret, P256_KEY_SIZE) != BIGNUM_OK)
+        goto out;
+    status = ECDH_OK;
 
+out:
+    if (status != ECDH_OK)
+        rintls_secure_zero(shared_secret, P256_KEY_SIZE);
     bn_clear(&k);
-    return ECDH_OK;
+    bn_clear(&prime);
+    bn_clear(&Q.x);
+    bn_clear(&Q.y);
+    bn_clear(&R.x);
+    bn_clear(&R.y);
+    return status;
 }
 
 /* ═══════════════════════════════════════

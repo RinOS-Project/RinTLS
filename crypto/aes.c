@@ -5,45 +5,58 @@
 
 #include "aes.h"
 
-/* AES S-box */
-static const u8 sbox[256] = {
-    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
-    0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
-    0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
-    0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
-    0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
-    0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
-    0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
-    0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
-    0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
-    0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
-    0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
-    0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
-    0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
-    0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
-    0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
-    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
-};
+/* Fixed-work GF(2^8) arithmetic avoids secret-indexed substitution tables. */
+static u8 aes_gf_mul(u8 left, u8 right)
+{
+    u8 result = 0u;
+    u32 bit;
+    for (bit = 0u; bit < 8u; ++bit) {
+        u8 select = (u8)(0u - (u32)(right & 1u));
+        u8 high = (u8)(0u - (u32)(left >> 7));
+        result ^= (u8)(left & select);
+        left = (u8)((left << 1) ^ (0x1bu & high));
+        right >>= 1;
+    }
+    return result;
+}
 
-/* Inverse S-box */
-static const u8 rsbox[256] = {
-    0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb,
-    0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87, 0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde, 0xe9, 0xcb,
-    0x54, 0x7b, 0x94, 0x32, 0xa6, 0xc2, 0x23, 0x3d, 0xee, 0x4c, 0x95, 0x0b, 0x42, 0xfa, 0xc3, 0x4e,
-    0x08, 0x2e, 0xa1, 0x66, 0x28, 0xd9, 0x24, 0xb2, 0x76, 0x5b, 0xa2, 0x49, 0x6d, 0x8b, 0xd1, 0x25,
-    0x72, 0xf8, 0xf6, 0x64, 0x86, 0x68, 0x98, 0x16, 0xd4, 0xa4, 0x5c, 0xcc, 0x5d, 0x65, 0xb6, 0x92,
-    0x6c, 0x70, 0x48, 0x50, 0xfd, 0xed, 0xb9, 0xda, 0x5e, 0x15, 0x46, 0x57, 0xa7, 0x8d, 0x9d, 0x84,
-    0x90, 0xd8, 0xab, 0x00, 0x8c, 0xbc, 0xd3, 0x0a, 0xf7, 0xe4, 0x58, 0x05, 0xb8, 0xb3, 0x45, 0x06,
-    0xd0, 0x2c, 0x1e, 0x8f, 0xca, 0x3f, 0x0f, 0x02, 0xc1, 0xaf, 0xbd, 0x03, 0x01, 0x13, 0x8a, 0x6b,
-    0x3a, 0x91, 0x11, 0x41, 0x4f, 0x67, 0xdc, 0xea, 0x97, 0xf2, 0xcf, 0xce, 0xf0, 0xb4, 0xe6, 0x73,
-    0x96, 0xac, 0x74, 0x22, 0xe7, 0xad, 0x35, 0x85, 0xe2, 0xf9, 0x37, 0xe8, 0x1c, 0x75, 0xdf, 0x6e,
-    0x47, 0xf1, 0x1a, 0x71, 0x1d, 0x29, 0xc5, 0x89, 0x6f, 0xb7, 0x62, 0x0e, 0xaa, 0x18, 0xbe, 0x1b,
-    0xfc, 0x56, 0x3e, 0x4b, 0xc6, 0xd2, 0x79, 0x20, 0x9a, 0xdb, 0xc0, 0xfe, 0x78, 0xcd, 0x5a, 0xf4,
-    0x1f, 0xdd, 0xa8, 0x33, 0x88, 0x07, 0xc7, 0x31, 0xb1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xec, 0x5f,
-    0x60, 0x51, 0x7f, 0xa9, 0x19, 0xb5, 0x4a, 0x0d, 0x2d, 0xe5, 0x7a, 0x9f, 0x93, 0xc9, 0x9c, 0xef,
-    0xa0, 0xe0, 0x3b, 0x4d, 0xae, 0x2a, 0xf5, 0xb0, 0xc8, 0xeb, 0xbb, 0x3c, 0x83, 0x53, 0x99, 0x61,
-    0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d
-};
+static u8 aes_gf_inverse(u8 value)
+{
+    u8 x2 = aes_gf_mul(value, value);
+    u8 x4 = aes_gf_mul(x2, x2);
+    u8 x8 = aes_gf_mul(x4, x4);
+    u8 x16 = aes_gf_mul(x8, x8);
+    u8 x32 = aes_gf_mul(x16, x16);
+    u8 x64 = aes_gf_mul(x32, x32);
+    u8 x128 = aes_gf_mul(x64, x64);
+    u8 inverse = aes_gf_mul(x128, x64);
+    inverse = aes_gf_mul(inverse, x32);
+    inverse = aes_gf_mul(inverse, x16);
+    inverse = aes_gf_mul(inverse, x8);
+    inverse = aes_gf_mul(inverse, x4);
+    return aes_gf_mul(inverse, x2);
+}
+
+static u8 aes_rotl8(u8 value, u32 shift)
+{
+    return (u8)((value << shift) | (value >> (8u - shift)));
+}
+
+static u8 aes_sub_byte(u8 value)
+{
+    u8 inverse = aes_gf_inverse(value);
+    return (u8)(inverse ^ aes_rotl8(inverse, 1u) ^
+                aes_rotl8(inverse, 2u) ^ aes_rotl8(inverse, 3u) ^
+                aes_rotl8(inverse, 4u) ^ 0x63u);
+}
+
+static u8 aes_inv_sub_byte(u8 value)
+{
+    u8 inverse_affine = (u8)(aes_rotl8(value, 1u) ^
+                             aes_rotl8(value, 3u) ^
+                             aes_rotl8(value, 6u) ^ 0x05u);
+    return aes_gf_inverse(inverse_affine);
+}
 
 /* Round constants */
 static const u8 rcon[11] = {
@@ -55,15 +68,6 @@ static u8 xtime(u8 x) {
     return (u8)((x << 1) ^ (((x >> 7) & 1) * 0x1b));
 }
 
-static u8 mul(u8 a, u8 b) {
-    u8 result = 0;
-    while (b) {
-        if (b & 1) result ^= a;
-        a = xtime(a);
-        b >>= 1;
-    }
-    return result;
-}
 
 /* Key expansion */
 int aes_init(aes_ctx* ctx, const u8* key, int key_size) {
@@ -94,17 +98,17 @@ int aes_init(aes_ctx* ctx, const u8* key, int key_size) {
 
         if (i % nk == 0) {
             /* RotWord + SubWord + Rcon */
-            temp[0] = sbox[(tmp >> 16) & 0xFF] ^ rcon[i / nk];
-            temp[1] = sbox[(tmp >> 8) & 0xFF];
-            temp[2] = sbox[tmp & 0xFF];
-            temp[3] = sbox[(tmp >> 24) & 0xFF];
+            temp[0] = aes_sub_byte((u8)((tmp >> 16) & 0xFF)) ^ rcon[i / nk];
+            temp[1] = aes_sub_byte((u8)((tmp >> 8) & 0xFF));
+            temp[2] = aes_sub_byte((u8)(tmp & 0xFF));
+            temp[3] = aes_sub_byte((u8)((tmp >> 24) & 0xFF));
             tmp = ((u32)temp[0] << 24) | ((u32)temp[1] << 16) | ((u32)temp[2] << 8) | temp[3];
         } else if (nk > 6 && i % nk == 4) {
             /* SubWord only for AES-256 */
-            temp[0] = sbox[(tmp >> 24) & 0xFF];
-            temp[1] = sbox[(tmp >> 16) & 0xFF];
-            temp[2] = sbox[(tmp >> 8) & 0xFF];
-            temp[3] = sbox[tmp & 0xFF];
+            temp[0] = aes_sub_byte((u8)((tmp >> 24) & 0xFF));
+            temp[1] = aes_sub_byte((u8)((tmp >> 16) & 0xFF));
+            temp[2] = aes_sub_byte((u8)((tmp >> 8) & 0xFF));
+            temp[3] = aes_sub_byte((u8)(tmp & 0xFF));
             tmp = ((u32)temp[0] << 24) | ((u32)temp[1] << 16) | ((u32)temp[2] << 8) | temp[3];
         }
 
@@ -136,22 +140,22 @@ void aes_encrypt_block(const aes_ctx* ctx, const u8* in, u8* out) {
         u8 tmp[16];
 
         /* SubBytes + ShiftRows */
-        tmp[0]  = sbox[state[0]];
-        tmp[1]  = sbox[state[5]];
-        tmp[2]  = sbox[state[10]];
-        tmp[3]  = sbox[state[15]];
-        tmp[4]  = sbox[state[4]];
-        tmp[5]  = sbox[state[9]];
-        tmp[6]  = sbox[state[14]];
-        tmp[7]  = sbox[state[3]];
-        tmp[8]  = sbox[state[8]];
-        tmp[9]  = sbox[state[13]];
-        tmp[10] = sbox[state[2]];
-        tmp[11] = sbox[state[7]];
-        tmp[12] = sbox[state[12]];
-        tmp[13] = sbox[state[1]];
-        tmp[14] = sbox[state[6]];
-        tmp[15] = sbox[state[11]];
+        tmp[0]  = aes_sub_byte((u8)(state[0]));
+        tmp[1]  = aes_sub_byte((u8)(state[5]));
+        tmp[2]  = aes_sub_byte((u8)(state[10]));
+        tmp[3]  = aes_sub_byte((u8)(state[15]));
+        tmp[4]  = aes_sub_byte((u8)(state[4]));
+        tmp[5]  = aes_sub_byte((u8)(state[9]));
+        tmp[6]  = aes_sub_byte((u8)(state[14]));
+        tmp[7]  = aes_sub_byte((u8)(state[3]));
+        tmp[8]  = aes_sub_byte((u8)(state[8]));
+        tmp[9]  = aes_sub_byte((u8)(state[13]));
+        tmp[10] = aes_sub_byte((u8)(state[2]));
+        tmp[11] = aes_sub_byte((u8)(state[7]));
+        tmp[12] = aes_sub_byte((u8)(state[12]));
+        tmp[13] = aes_sub_byte((u8)(state[1]));
+        tmp[14] = aes_sub_byte((u8)(state[6]));
+        tmp[15] = aes_sub_byte((u8)(state[11]));
 
         /* MixColumns */
         for (i = 0; i < 4; i++) {
@@ -176,22 +180,22 @@ void aes_encrypt_block(const aes_ctx* ctx, const u8* in, u8* out) {
     /* Final round (no MixColumns) */
     {
         u8 tmp[16];
-        tmp[0]  = sbox[state[0]];
-        tmp[1]  = sbox[state[5]];
-        tmp[2]  = sbox[state[10]];
-        tmp[3]  = sbox[state[15]];
-        tmp[4]  = sbox[state[4]];
-        tmp[5]  = sbox[state[9]];
-        tmp[6]  = sbox[state[14]];
-        tmp[7]  = sbox[state[3]];
-        tmp[8]  = sbox[state[8]];
-        tmp[9]  = sbox[state[13]];
-        tmp[10] = sbox[state[2]];
-        tmp[11] = sbox[state[7]];
-        tmp[12] = sbox[state[12]];
-        tmp[13] = sbox[state[1]];
-        tmp[14] = sbox[state[6]];
-        tmp[15] = sbox[state[11]];
+        tmp[0]  = aes_sub_byte((u8)(state[0]));
+        tmp[1]  = aes_sub_byte((u8)(state[5]));
+        tmp[2]  = aes_sub_byte((u8)(state[10]));
+        tmp[3]  = aes_sub_byte((u8)(state[15]));
+        tmp[4]  = aes_sub_byte((u8)(state[4]));
+        tmp[5]  = aes_sub_byte((u8)(state[9]));
+        tmp[6]  = aes_sub_byte((u8)(state[14]));
+        tmp[7]  = aes_sub_byte((u8)(state[3]));
+        tmp[8]  = aes_sub_byte((u8)(state[8]));
+        tmp[9]  = aes_sub_byte((u8)(state[13]));
+        tmp[10] = aes_sub_byte((u8)(state[2]));
+        tmp[11] = aes_sub_byte((u8)(state[7]));
+        tmp[12] = aes_sub_byte((u8)(state[12]));
+        tmp[13] = aes_sub_byte((u8)(state[1]));
+        tmp[14] = aes_sub_byte((u8)(state[6]));
+        tmp[15] = aes_sub_byte((u8)(state[11]));
 
         for (i = 0; i < 4; i++) {
             u32 rk = ctx->rk[ctx->nr * 4 + i];
@@ -224,22 +228,22 @@ void aes_decrypt_block(const aes_ctx* ctx, const u8* in, u8* out) {
         u8 tmp[16];
 
         /* InvShiftRows + InvSubBytes */
-        tmp[0]  = rsbox[state[0]];
-        tmp[1]  = rsbox[state[13]];
-        tmp[2]  = rsbox[state[10]];
-        tmp[3]  = rsbox[state[7]];
-        tmp[4]  = rsbox[state[4]];
-        tmp[5]  = rsbox[state[1]];
-        tmp[6]  = rsbox[state[14]];
-        tmp[7]  = rsbox[state[11]];
-        tmp[8]  = rsbox[state[8]];
-        tmp[9]  = rsbox[state[5]];
-        tmp[10] = rsbox[state[2]];
-        tmp[11] = rsbox[state[15]];
-        tmp[12] = rsbox[state[12]];
-        tmp[13] = rsbox[state[9]];
-        tmp[14] = rsbox[state[6]];
-        tmp[15] = rsbox[state[3]];
+        tmp[0]  = aes_inv_sub_byte((u8)(state[0]));
+        tmp[1]  = aes_inv_sub_byte((u8)(state[13]));
+        tmp[2]  = aes_inv_sub_byte((u8)(state[10]));
+        tmp[3]  = aes_inv_sub_byte((u8)(state[7]));
+        tmp[4]  = aes_inv_sub_byte((u8)(state[4]));
+        tmp[5]  = aes_inv_sub_byte((u8)(state[1]));
+        tmp[6]  = aes_inv_sub_byte((u8)(state[14]));
+        tmp[7]  = aes_inv_sub_byte((u8)(state[11]));
+        tmp[8]  = aes_inv_sub_byte((u8)(state[8]));
+        tmp[9]  = aes_inv_sub_byte((u8)(state[5]));
+        tmp[10] = aes_inv_sub_byte((u8)(state[2]));
+        tmp[11] = aes_inv_sub_byte((u8)(state[15]));
+        tmp[12] = aes_inv_sub_byte((u8)(state[12]));
+        tmp[13] = aes_inv_sub_byte((u8)(state[9]));
+        tmp[14] = aes_inv_sub_byte((u8)(state[6]));
+        tmp[15] = aes_inv_sub_byte((u8)(state[3]));
 
         /* AddRoundKey */
         for (i = 0; i < 4; i++) {
@@ -253,32 +257,32 @@ void aes_decrypt_block(const aes_ctx* ctx, const u8* in, u8* out) {
         /* InvMixColumns */
         for (i = 0; i < 4; i++) {
             u8 a = tmp[i*4+0], b = tmp[i*4+1], c = tmp[i*4+2], d = tmp[i*4+3];
-            state[i*4+0] = mul(a, 0x0e) ^ mul(b, 0x0b) ^ mul(c, 0x0d) ^ mul(d, 0x09);
-            state[i*4+1] = mul(a, 0x09) ^ mul(b, 0x0e) ^ mul(c, 0x0b) ^ mul(d, 0x0d);
-            state[i*4+2] = mul(a, 0x0d) ^ mul(b, 0x09) ^ mul(c, 0x0e) ^ mul(d, 0x0b);
-            state[i*4+3] = mul(a, 0x0b) ^ mul(b, 0x0d) ^ mul(c, 0x09) ^ mul(d, 0x0e);
+            state[i*4+0] = aes_gf_mul(a, 0x0e) ^ aes_gf_mul(b, 0x0b) ^ aes_gf_mul(c, 0x0d) ^ aes_gf_mul(d, 0x09);
+            state[i*4+1] = aes_gf_mul(a, 0x09) ^ aes_gf_mul(b, 0x0e) ^ aes_gf_mul(c, 0x0b) ^ aes_gf_mul(d, 0x0d);
+            state[i*4+2] = aes_gf_mul(a, 0x0d) ^ aes_gf_mul(b, 0x09) ^ aes_gf_mul(c, 0x0e) ^ aes_gf_mul(d, 0x0b);
+            state[i*4+3] = aes_gf_mul(a, 0x0b) ^ aes_gf_mul(b, 0x0d) ^ aes_gf_mul(c, 0x09) ^ aes_gf_mul(d, 0x0e);
         }
     }
 
     /* Final round */
     {
         u8 tmp[16];
-        tmp[0]  = rsbox[state[0]];
-        tmp[1]  = rsbox[state[13]];
-        tmp[2]  = rsbox[state[10]];
-        tmp[3]  = rsbox[state[7]];
-        tmp[4]  = rsbox[state[4]];
-        tmp[5]  = rsbox[state[1]];
-        tmp[6]  = rsbox[state[14]];
-        tmp[7]  = rsbox[state[11]];
-        tmp[8]  = rsbox[state[8]];
-        tmp[9]  = rsbox[state[5]];
-        tmp[10] = rsbox[state[2]];
-        tmp[11] = rsbox[state[15]];
-        tmp[12] = rsbox[state[12]];
-        tmp[13] = rsbox[state[9]];
-        tmp[14] = rsbox[state[6]];
-        tmp[15] = rsbox[state[3]];
+        tmp[0]  = aes_inv_sub_byte((u8)(state[0]));
+        tmp[1]  = aes_inv_sub_byte((u8)(state[13]));
+        tmp[2]  = aes_inv_sub_byte((u8)(state[10]));
+        tmp[3]  = aes_inv_sub_byte((u8)(state[7]));
+        tmp[4]  = aes_inv_sub_byte((u8)(state[4]));
+        tmp[5]  = aes_inv_sub_byte((u8)(state[1]));
+        tmp[6]  = aes_inv_sub_byte((u8)(state[14]));
+        tmp[7]  = aes_inv_sub_byte((u8)(state[11]));
+        tmp[8]  = aes_inv_sub_byte((u8)(state[8]));
+        tmp[9]  = aes_inv_sub_byte((u8)(state[5]));
+        tmp[10] = aes_inv_sub_byte((u8)(state[2]));
+        tmp[11] = aes_inv_sub_byte((u8)(state[15]));
+        tmp[12] = aes_inv_sub_byte((u8)(state[12]));
+        tmp[13] = aes_inv_sub_byte((u8)(state[9]));
+        tmp[14] = aes_inv_sub_byte((u8)(state[6]));
+        tmp[15] = aes_inv_sub_byte((u8)(state[3]));
 
         for (i = 0; i < 4; i++) {
             u32 rk = ctx->rk[i];
