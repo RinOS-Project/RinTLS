@@ -138,7 +138,11 @@ typedef enum {
     TLS_STATE_SERVER_TLS12_HELLO_DONE_SENT,
     TLS_STATE_SERVER_TLS12_CLIENT_KEY_EXCHANGE_RECEIVED,
     TLS_STATE_SERVER_TLS12_KEYS_DERIVED,
-    TLS_STATE_SERVER_TLS12_CHANGE_CIPHER_SPEC_RECEIVED
+    TLS_STATE_SERVER_TLS12_CHANGE_CIPHER_SPEC_RECEIVED,
+    TLS_STATE_TLS12_CLIENT_CERTIFICATE_SENT,
+    TLS_STATE_SERVER_TLS12_CERTIFICATE_REQUEST_SENT,
+    TLS_STATE_SERVER_TLS12_CLIENT_CERTIFICATE_RECEIVED,
+    TLS_STATE_SERVER_TLS12_CLIENT_CERTIFICATE_VERIFY_RECEIVED
 } tls_state_t;
 
 /* ═══════════════════════════════════════
@@ -157,6 +161,11 @@ typedef enum {
 #define TLS_MAX_CLIENT_SIGNATURE_ALGORITHMS_BYTES \
     (2u + TLS_MAX_CLIENT_SIGNATURE_SCHEMES * 2u)
 #define TLS_MAX_CLIENT_CERTIFICATE_AUTHORITIES_BYTES 4098u
+/* TLS 1.2 CertificateVerify signs the complete Handshake transcript rather
+ * than a TLS 1.3 transcript hash. Keep a bounded copy so the product-owned
+ * signer receives the exact RFC 5246 input without exposing a private key to
+ * the transport. A larger transcript is rejected before authentication. */
+#define TLS_MAX_CLIENT_CERTIFICATE_SIGNED_TRANSCRIPT (64u * 1024u)
 #define TLS_MAX_CLIENT_CIPHER_SUITES 8u
 #define TLS_MAX_PEER_CIPHER_SUITES 32u
 #define TLS_MAX_PEER_SUPPORTED_VERSIONS 8u
@@ -240,6 +249,9 @@ typedef struct {
     sha256_ctx transcript_hash;
     sha384_ctx transcript_hash_384;  /* TLS 1.3 SHA-384 */
     int use_sha384;
+    u8 transcript_bytes[TLS_MAX_CLIENT_CERTIFICATE_SIGNED_TRANSCRIPT];
+    rin_size_t transcript_bytes_len;
+    int transcript_bytes_overflow;
 
     /* TLS 1.3: server Finishedまでのトランスクリプトハッシュ
      * (アプリケーション鍵導出に使用 - client Finishedを含まない) */
@@ -299,6 +311,7 @@ typedef struct {
         TLS_MAX_CLIENT_CERTIFICATE_AUTHORITIES_BYTES];
     rin_size_t client_certificate_authorities_len;
     int client_certificate_request_metadata_valid;
+    int server_tls12_client_certificate_received;
 
     /* Server identity.  The certificate_list is TLS wire-format and the
      * private key is never retained here; CertificateVerify calls the

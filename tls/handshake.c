@@ -1239,14 +1239,67 @@ int tls_send_server_key_exchange(tls_handshake_ctx_t* ctx)
 
 int tls_send_server_hello_done(tls_handshake_ctx_t* ctx)
 {
-    const u8 msg[] = {TLS_HS_SERVER_HELLO_DONE, 0u, 0u, 0u};
     if (!ctx || !ctx->is_server || ctx->is_tls13 ||
-        ctx->state != TLS_STATE_SERVER_TLS12_KEY_EXCHANGE_SENT)
+        (ctx->state != TLS_STATE_SERVER_TLS12_KEY_EXCHANGE_SENT &&
+         ctx->state != TLS_STATE_SERVER_TLS12_CERTIFICATE_REQUEST_SENT))
         return TLS_HS_ERR_UNEXPECTED;
     if (ctx->pending_send_kind != TLS_PENDING_SEND_NONE) {
         return tls_handshake_flush_pending_send(
             ctx, TLS_PENDING_SEND_SERVER_HELLO_DONE);
     }
+
+    if (ctx->server_client_certificate_required &&
+        ctx->state == TLS_STATE_SERVER_TLS12_KEY_EXCHANGE_SENT) {
+        /* RFC 5246 orders CertificateRequest after ServerKeyExchange and
+         * before ServerHelloDone. Advertise only schemes this endpoint can
+         * verify and that the peer offered in ClientHello. */
+        static const u8 certificate_types[] = {1u, 64u}; /* RSA/ECDSA */
+        static const u16 schemes[] = {
+            TLS_SIG_RSA_PSS_RSAE_SHA256,
+            TLS_SIG_RSA_PKCS1_SHA256,
+            TLS_SIG_ECDSA_SECP256R1_SHA256
+        };
+        u8 request[256];
+        rin_size_t pos = 0u;
+        rin_size_t length_pos;
+        rin_size_t body_start;
+        rin_size_t sig_list_start;
+        rin_size_t sig_count = 0u;
+
+        request[pos++] = TLS_HS_CERTIFICATE_REQUEST;
+        length_pos = pos;
+        pos += 3u;
+        body_start = pos;
+        request[pos++] = (u8)sizeof(certificate_types);
+        rintls_memcpy(request + pos, certificate_types,
+                      sizeof(certificate_types));
+        pos += sizeof(certificate_types);
+        sig_list_start = pos;
+        pos += 2u;
+        for (rin_size_t index = 0u;
+             index < sizeof(schemes) / sizeof(schemes[0]); ++index) {
+            if (ctx->peer_signature_scheme_count != 0u &&
+                !tls_server_peer_offers(schemes[index], ctx))
+                continue;
+            write_u16(request + pos, schemes[index]);
+            pos += 2u;
+            ++sig_count;
+        }
+        if (sig_count == 0u) return TLS_HS_ERR_SIGNATURE;
+        write_u16(request + sig_list_start, (u16)(sig_count * 2u));
+        write_u16(request + pos, 0u); /* empty certificate_authorities */
+        pos += 2u;
+        write_u24(request + length_pos, (u32)(pos - body_start));
+        int request_result = tls_handshake_stage_pending_send(
+            ctx, TLS_PENDING_SEND_SERVER_HELLO_DONE, 0,
+            TLS_CONTENT_HANDSHAKE, TLS_VERSION_1_2, request, pos, 1,
+            TLS_STATE_SERVER_TLS12_CERTIFICATE_REQUEST_SENT);
+        if (request_result != TLS_HS_ERR_OK) return request_result;
+        return tls_handshake_flush_pending_send(
+            ctx, TLS_PENDING_SEND_SERVER_HELLO_DONE);
+    }
+
+    const u8 msg[] = {TLS_HS_SERVER_HELLO_DONE, 0u, 0u, 0u};
     int result = tls_handshake_stage_pending_send(
         ctx, TLS_PENDING_SEND_SERVER_HELLO_DONE, 0, TLS_CONTENT_HANDSHAKE,
         TLS_VERSION_1_2, msg, sizeof(msg), 1,
@@ -1263,7 +1316,8 @@ int tls_recv_client_key_exchange(tls_handshake_ctx_t* ctx)
     int len;
 
     if (!ctx || !ctx->is_server || ctx->is_tls13 ||
-        ctx->state != TLS_STATE_SERVER_TLS12_HELLO_DONE_SENT)
+        (ctx->state != TLS_STATE_SERVER_TLS12_HELLO_DONE_SENT &&
+         ctx->state != TLS_STATE_SERVER_TLS12_CLIENT_CERTIFICATE_RECEIVED))
         return TLS_HS_ERR_UNEXPECTED;
     len = tls_handshake_recv_message(ctx, msg, sizeof(msg), &message_type);
     if (len < 0) return len;
@@ -1449,7 +1503,8 @@ int tls_handshake_set_client_certificate(
         return TLS_HS_ERR_CERTIFICATE;
     if ((ctx->state != TLS_STATE_INIT &&
          ctx->state != TLS_STATE_CLIENT_CERTIFICATE &&
-         ctx->state != TLS_STATE_ENCRYPTED_EXTENSIONS) ||
+         ctx->state != TLS_STATE_ENCRYPTED_EXTENSIONS &&
+         ctx->state != TLS_STATE_SERVER_KEY_EXCHANGE) ||
         ctx->client_certificate_list || ctx->client_certificate_declined)
         return TLS_HS_ERR_UNEXPECTED;
 
@@ -1513,6 +1568,9 @@ int tls_handshake_set_client_certificate(
 static int tls_client_signature_scheme_supported(u16 scheme)
 {
     switch (scheme) {
+    case TLS_SIG_RSA_PKCS1_SHA256:
+    case TLS_SIG_RSA_PKCS1_SHA384:
+    case TLS_SIG_RSA_PKCS1_SHA512:
     case TLS_SIG_ECDSA_SECP256R1_SHA256:
     case TLS_SIG_ECDSA_SECP384R1_SHA384:
     case TLS_SIG_ECDSA_SECP521R1_SHA512:
@@ -1689,6 +1747,21 @@ int tls_handshake_get_client_certificate_request(
 
 void tls_transcript_update(tls_handshake_ctx_t* ctx, const u8* data, rin_size_t len)
 {
+    /* TLS 1.2 CertificateVerify signs the handshake bytes themselves. Keep
+     * an independent bounded copy in addition to the running hash used by
+     * Finished. Once the bound is exceeded, authentication must fail closed;
+     * never sign only a truncated transcript. */
+    if (ctx && !ctx->transcript_bytes_overflow) {
+        if (len > TLS_MAX_CLIENT_CERTIFICATE_SIGNED_TRANSCRIPT -
+                    ctx->transcript_bytes_len) {
+            ctx->transcript_bytes_overflow = 1;
+        } else {
+            rintls_memcpy(ctx->transcript_bytes + ctx->transcript_bytes_len,
+                          data, len);
+            ctx->transcript_bytes_len += len;
+        }
+    }
+
     /* バイト合計を計算 (データ整合性チェック) */
     u32 byte_sum = 0;
     for (rin_size_t i = 0; i < len; i++) {
@@ -2774,27 +2847,107 @@ int tls_recv_certificate_request(tls_handshake_ctx_t* ctx,
         ctx->client_signature_scheme = parsed_default_scheme;
         ctx->client_certificate_request_metadata_valid = 1;
     } else {
-        /* TLS 1.2 CertificateRequest starts with certificate_types and a
-         * certificate_authorities vector.  SignatureAlgorithms is optional;
-         * the callback may still select the implementation's default. */
+        /* RFC 5246 7.4.4: certificate_types, the mandatory TLS 1.2
+         * supported_signature_algorithms vector, then certificate_authorities.
+         * The previous parser skipped the signature vector and therefore
+         * interpreted its length as the CA-list length. Do not retain a
+         * partially parsed request. */
+        u8 parsed_signature_algorithms[
+            TLS_MAX_CLIENT_SIGNATURE_ALGORITHMS_BYTES];
+        u8 parsed_certificate_authorities[
+            TLS_MAX_CLIENT_CERTIFICATE_AUTHORITIES_BYTES];
+        u16 parsed_schemes[TLS_MAX_CLIENT_SIGNATURE_SCHEMES];
+        rin_size_t parsed_signature_algorithms_len = 0u;
+        rin_size_t parsed_certificate_authorities_len = 0u;
+        u16 parsed_scheme_count = 0u;
+        u16 parsed_default_scheme = 0u;
+
+        rintls_memset(parsed_signature_algorithms, 0,
+                      sizeof(parsed_signature_algorithms));
+        rintls_memset(parsed_certificate_authorities, 0,
+                      sizeof(parsed_certificate_authorities));
+        rintls_memset(parsed_schemes, 0, sizeof(parsed_schemes));
+
         if (p + 1u > end) return TLS_HS_ERR_UNEXPECTED;
         u8 certificate_types_len = *p++;
         if (p + certificate_types_len + 2u > end) return TLS_HS_ERR_UNEXPECTED;
         p += certificate_types_len;
+
+        u16 signature_algorithms_len = read_u16(p);
+        p += 2u;
+        if (signature_algorithms_len < 2u ||
+            (signature_algorithms_len & 1u) ||
+            signature_algorithms_len > TLS_MAX_CLIENT_SIGNATURE_SCHEMES * 2u ||
+            p + signature_algorithms_len > end)
+            return TLS_HS_ERR_UNEXPECTED;
+        rin_size_t signature_vector_len = signature_algorithms_len + 2u;
+        rintls_memcpy(parsed_signature_algorithms, p - 2u,
+                      signature_vector_len);
+        parsed_signature_algorithms_len = signature_vector_len;
+        for (u16 offset = 0u; offset < signature_algorithms_len;
+             offset += 2u) {
+            u16 scheme = read_u16(p + offset);
+            if (parsed_scheme_count >= TLS_MAX_CLIENT_SIGNATURE_SCHEMES)
+                return TLS_HS_ERR_UNEXPECTED;
+            parsed_schemes[parsed_scheme_count++] = scheme;
+            if (parsed_default_scheme == 0u &&
+                tls_client_signature_scheme_supported(scheme))
+                parsed_default_scheme = scheme;
+        }
+        p += signature_algorithms_len;
+
+        if (p + 2u > end) return TLS_HS_ERR_UNEXPECTED;
         u16 authorities_len = read_u16(p);
         p += 2u;
-        if (p + authorities_len > end) return TLS_HS_ERR_UNEXPECTED;
+        if (authorities_len > sizeof(parsed_certificate_authorities) - 2u ||
+            p + authorities_len != end)
+            return TLS_HS_ERR_UNEXPECTED;
+        const u8* authority = p;
+        const u8* authorities_end = p + authorities_len;
+        while (authority < authorities_end) {
+            if ((u32)(authorities_end - authority) < 2u)
+                return TLS_HS_ERR_UNEXPECTED;
+            u16 name_len = read_u16(authority);
+            authority += 2u;
+            if (name_len == 0u ||
+                (u32)(authorities_end - authority) < name_len)
+                return TLS_HS_ERR_UNEXPECTED;
+            authority += name_len;
+        }
+        if (authority != authorities_end) return TLS_HS_ERR_UNEXPECTED;
+        rintls_memcpy(parsed_certificate_authorities, p - 2u,
+                      authorities_len + 2u);
+        parsed_certificate_authorities_len = authorities_len + 2u;
+
+        rintls_memcpy(ctx->client_signature_algorithms,
+                      parsed_signature_algorithms,
+                      sizeof(ctx->client_signature_algorithms));
+        rintls_memcpy(ctx->client_signature_schemes, parsed_schemes,
+                      sizeof(ctx->client_signature_schemes));
+        rintls_memcpy(ctx->client_certificate_authorities,
+                      parsed_certificate_authorities,
+                      sizeof(ctx->client_certificate_authorities));
+        ctx->client_signature_algorithms_len =
+            parsed_signature_algorithms_len;
+        ctx->client_signature_algorithms_cert_len = 0u;
+        ctx->client_certificate_authorities_len =
+            parsed_certificate_authorities_len;
+        ctx->client_signature_scheme_count = parsed_scheme_count;
+        ctx->client_signature_scheme = parsed_default_scheme;
+        ctx->client_certificate_request_metadata_valid = 1;
     }
 
     tls_transcript_update(ctx, msg, 4u + msg_len);
     ctx->client_certificate_requested = 1;
     if (!ctx->is_tls13) {
-        /* TLS 1.2 CertificateVerify requires a legacy MD5/SHA transcript
-         * construction that this transport intentionally does not expose to
-         * the signer capability.  Refuse the challenge instead of sending a
-         * certificate without proof of possession. */
-        ctx->state = TLS_STATE_ERROR;
-        return TLS_HS_ERR_CERTIFICATE;
+        /* The complete TLS 1.2 transcript is captured above. If the identity
+         * was configured before the request, continue to ServerHelloDone;
+         * otherwise let the credential provider install it before the next
+         * record is consumed. */
+        if (!ctx->client_certificate_list &&
+            !ctx->client_certificate_declined)
+            return TLS_HS_ERR_WANT_CREDENTIALS;
+        return TLS_HS_ERR_OK;
     }
     /* TLS 1.3 sends the client Certificate/CertificateVerify only after the
      * client has received the server Certificate, CertificateVerify, and
@@ -2804,13 +2957,78 @@ int tls_recv_certificate_request(tls_handshake_ctx_t* ctx,
     return TLS_HS_ERR_OK;
 }
 
+static int tls_client_certificate_scheme_matches(const x509_cert_t* cert,
+                                                 u16 scheme)
+{
+    if (!cert) return 0;
+    if (cert->key_type == X509_KEY_RSA) {
+        return scheme == TLS_SIG_RSA_PKCS1_SHA256 ||
+               scheme == TLS_SIG_RSA_PKCS1_SHA384 ||
+               scheme == TLS_SIG_RSA_PKCS1_SHA512 ||
+               scheme == TLS_SIG_RSA_PSS_RSAE_SHA256 ||
+               scheme == TLS_SIG_RSA_PSS_RSAE_SHA384 ||
+               scheme == TLS_SIG_RSA_PSS_RSAE_SHA512;
+    }
+    if (cert->key_type == X509_KEY_ECDSA) {
+        return (cert->pubkey.ecdsa.curve == ECDSA_CURVE_P256 &&
+                scheme == TLS_SIG_ECDSA_SECP256R1_SHA256) ||
+               (cert->pubkey.ecdsa.curve == ECDSA_CURVE_P384 &&
+                scheme == TLS_SIG_ECDSA_SECP384R1_SHA384) ||
+               (cert->pubkey.ecdsa.curve == ECDSA_CURVE_P521 &&
+                scheme == TLS_SIG_ECDSA_SECP521R1_SHA512);
+    }
+    return 0;
+}
+
+/* Select an offered CertificateVerify scheme compatible with the public key
+ * in the configured leaf certificate. This keeps the transport from asking
+ * an RSA signer to produce an ECDSA signature (or vice versa) merely because
+ * the server listed that scheme first. */
+static int tls_select_client_certificate_scheme(tls_handshake_ctx_t* ctx)
+{
+    if (!ctx || !ctx->client_certificate_list ||
+        ctx->client_signature_scheme_count == 0u)
+        return TLS_HS_ERR_CERTIFICATE;
+
+    const u8* list = ctx->client_certificate_list;
+    if (ctx->client_certificate_list_len < 6u ||
+        read_u24(list) != ctx->client_certificate_list_len - 3u)
+        return TLS_HS_ERR_CERTIFICATE;
+    u32 cert_len = read_u24(list + 3u);
+    if (cert_len == 0u || cert_len > RINTLS_MAX_CERT_SIZE ||
+        (size_t)(ctx->client_certificate_list_len - 6u) < cert_len)
+        return TLS_HS_ERR_CERTIFICATE;
+
+    x509_cert_t certificate;
+    rintls_memset(&certificate, 0, sizeof(certificate));
+    if (x509_parse_cert(&certificate, list + 6u, cert_len) != X509_OK)
+        return TLS_HS_ERR_CERTIFICATE;
+    if (tls_client_certificate_scheme_matches(
+            &certificate, ctx->client_signature_scheme))
+        return TLS_HS_ERR_OK;
+
+    for (u16 index = 0u; index < ctx->client_signature_scheme_count;
+         ++index) {
+        u16 scheme = ctx->client_signature_schemes[index];
+        if (tls_client_signature_scheme_supported(scheme) &&
+            tls_client_certificate_scheme_matches(&certificate, scheme)) {
+            ctx->client_signature_scheme = scheme;
+            return TLS_HS_ERR_OK;
+        }
+    }
+    return TLS_HS_ERR_CERTIFICATE;
+}
+
 int tls_send_client_certificate(tls_handshake_ctx_t* ctx)
 {
     if (!ctx || !ctx->client_certificate_requested ||
         (!ctx->client_certificate_declined &&
          (!ctx->client_certificate_list || !ctx->client_certificate_sign)) ||
-        (ctx->client_certificate_declined && ctx->client_certificate_list) ||
-        (!ctx->client_certificate_declined &&
+        (ctx->client_certificate_declined && ctx->client_certificate_list))
+        return TLS_HS_ERR_CERTIFICATE;
+
+    if (!ctx->client_certificate_declined &&
+        (tls_select_client_certificate_scheme(ctx) != TLS_HS_ERR_OK ||
          !tls_client_signature_scheme_supported(
              ctx->client_signature_scheme)))
         return TLS_HS_ERR_CERTIFICATE;
@@ -2818,10 +3036,47 @@ int tls_send_client_certificate(tls_handshake_ctx_t* ctx)
     u8 msg[TLS_MAX_PENDING_HANDSHAKE_SEND];
     rin_size_t pos = 0u;
     rin_size_t context_len = ctx->is_tls13 ? 1u : 0u;
+    rin_size_t legacy_body_len = 0u;
     /* The TLS Certificate message always carries the 3-byte certificate_list
      * vector, including when the vector is empty. */
-    rin_size_t list_len = ctx->client_certificate_declined
-        ? 3u : ctx->client_certificate_list_len;
+    rin_size_t list_len = 3u;
+    if (!ctx->client_certificate_declined && ctx->is_tls13) {
+        list_len = ctx->client_certificate_list_len;
+    } else if (!ctx->client_certificate_declined) {
+        /* The managed certificate builder uses the TLS 1.3 wire form for
+         * both protocol versions. Convert its CertificateEntry extensions
+         * away when TLS 1.2 emits the legacy certificate_list. */
+        const u8* source = ctx->client_certificate_list;
+        const u8* source_end = source + ctx->client_certificate_list_len;
+        if (ctx->client_certificate_list_len < 3u ||
+            read_u24(source) != ctx->client_certificate_list_len - 3u)
+            return TLS_HS_ERR_CERTIFICATE;
+        const u8* entry = source + 3u;
+        while (entry < source_end) {
+            if ((size_t)(source_end - entry) < 3u)
+                return TLS_HS_ERR_CERTIFICATE;
+            u32 cert_len = read_u24(entry);
+            entry += 3u;
+            if (cert_len == 0u || (size_t)(source_end - entry) < cert_len)
+                return TLS_HS_ERR_CERTIFICATE;
+            if (cert_len > TLS_MAX_PENDING_HANDSHAKE_SEND - 6u ||
+                legacy_body_len > TLS_MAX_PENDING_HANDSHAKE_SEND -
+                                  3u - cert_len)
+                return TLS_HS_ERR_CERTIFICATE;
+            legacy_body_len += 3u + cert_len;
+            entry += cert_len;
+            if ((size_t)(source_end - entry) < 2u)
+                return TLS_HS_ERR_CERTIFICATE;
+            u16 extensions_len = read_u16(entry);
+            entry += 2u;
+            if ((size_t)(source_end - entry) < extensions_len)
+                return TLS_HS_ERR_CERTIFICATE;
+            entry += extensions_len;
+        }
+        if (entry != source_end || legacy_body_len == 0u)
+            return TLS_HS_ERR_CERTIFICATE;
+        list_len = 3u + legacy_body_len;
+    }
     if (list_len > sizeof(msg) - 4u - context_len)
         return TLS_HS_ERR_CERTIFICATE;
     msg[pos++] = TLS_HS_CERTIFICATE;
@@ -2831,10 +3086,30 @@ int tls_send_client_certificate(tls_handshake_ctx_t* ctx)
         msg[pos++] = 0u; /* CertificateRequestContext */
     if (ctx->client_certificate_declined) {
         write_u24(msg + pos, 0u);
-    } else {
+    } else if (ctx->is_tls13) {
         rintls_memcpy(msg + pos, ctx->client_certificate_list, list_len);
+    } else {
+        const u8* source = ctx->client_certificate_list + 3u;
+        const u8* source_end = ctx->client_certificate_list +
+                               ctx->client_certificate_list_len;
+        write_u24(msg + pos, (u32)legacy_body_len);
+        pos += 3u;
+        rin_size_t write_pos = pos;
+        while (source < source_end) {
+            u32 cert_len = read_u24(source);
+            source += 3u;
+            write_u24(msg + write_pos, cert_len);
+            write_pos += 3u;
+            rintls_memcpy(msg + write_pos, source, cert_len);
+            write_pos += cert_len;
+            source += cert_len;
+            u16 extensions_len = read_u16(source);
+            source += 2u + extensions_len;
+        }
+        pos = write_pos;
     }
-    pos += list_len;
+    if (ctx->client_certificate_declined || ctx->is_tls13)
+        pos += list_len;
 
     if (ctx->pending_send_kind != TLS_PENDING_SEND_NONE) {
         return tls_handshake_flush_pending_send(
@@ -2843,9 +3118,11 @@ int tls_send_client_certificate(tls_handshake_ctx_t* ctx)
     int ret = tls_handshake_stage_pending_send(
         ctx, TLS_PENDING_SEND_CLIENT_CERTIFICATE, ctx->is_tls13,
         TLS_CONTENT_HANDSHAKE, ctx->version, msg, pos, 1,
-        ctx->client_certificate_declined
-            ? TLS_STATE_CERTIFICATE_RECEIVED
-            : TLS_STATE_CLIENT_CERTIFICATE_VERIFY);
+        ctx->is_tls13
+            ? (ctx->client_certificate_declined
+                ? TLS_STATE_CERTIFICATE_RECEIVED
+                : TLS_STATE_CLIENT_CERTIFICATE_VERIFY)
+            : TLS_STATE_TLS12_CLIENT_CERTIFICATE_SENT);
     if (ret != TLS_HS_ERR_OK) return ret;
     ret = tls_handshake_flush_pending_send(ctx,
                                            TLS_PENDING_SEND_CLIENT_CERTIFICATE);
@@ -2859,6 +3136,45 @@ int tls_send_client_certificate_verify(tls_handshake_ctx_t* ctx)
         ctx->client_certificate_declined || !ctx->client_certificate_sign)
         return TLS_HS_ERR_CERTIFICATE;
     if (ctx->pending_send_kind != TLS_PENDING_SEND_NONE) {
+        return tls_handshake_flush_pending_send(
+            ctx, TLS_PENDING_SEND_CLIENT_CERTIFICATE_VERIFY);
+    }
+
+    if (!ctx->is_tls13) {
+        if (ctx->transcript_bytes_overflow ||
+            ctx->transcript_bytes_len == 0u)
+            return TLS_HS_ERR_SIGNATURE;
+
+        u8 signature[TLS_MAX_CLIENT_SIGNATURE_BYTES];
+        rin_size_t signature_len = 0u;
+        int sign_result = ctx->client_certificate_sign(
+            ctx->client_certificate_sign_opaque, ctx->client_signature_scheme,
+            ctx->transcript_bytes, ctx->transcript_bytes_len, signature,
+            sizeof(signature), &signature_len);
+        if (sign_result != 0 || signature_len == 0u ||
+            signature_len > sizeof(signature)) {
+            rintls_secure_zero(signature, sizeof(signature));
+            return TLS_HS_ERR_SIGNATURE;
+        }
+
+        u8 msg[TLS_MAX_PENDING_HANDSHAKE_SEND];
+        rin_size_t pos = 0u;
+        msg[pos++] = TLS_HS_CERTIFICATE_VERIFY;
+        write_u24(msg + pos, 4u + signature_len);
+        pos += 3u;
+        write_u16(msg + pos, ctx->client_signature_scheme);
+        pos += 2u;
+        write_u16(msg + pos, (u16)signature_len);
+        pos += 2u;
+        rintls_memcpy(msg + pos, signature, signature_len);
+        pos += signature_len;
+        rintls_secure_zero(signature, sizeof(signature));
+
+        int ret = tls_handshake_stage_pending_send(
+            ctx, TLS_PENDING_SEND_CLIENT_CERTIFICATE_VERIFY, 0,
+            TLS_CONTENT_HANDSHAKE, TLS_VERSION_1_2, msg, pos, 1,
+            TLS_STATE_CLIENT_CERTIFICATE_FINISHED);
+        if (ret != TLS_HS_ERR_OK) return ret;
         return tls_handshake_flush_pending_send(
             ctx, TLS_PENDING_SEND_CLIENT_CERTIFICATE_VERIFY);
     }
@@ -3121,9 +3437,14 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
     write_u32_le(ctx->peer_certificate_chain,
                  ctx->peer_certificate_chain_count);
 
-    ctx->state = ctx->is_server
-        ? TLS_STATE_SERVER_CLIENT_CERTIFICATE_RECEIVED
-        : TLS_STATE_CERTIFICATE_RECEIVED;
+    if (ctx->is_server && !ctx->is_tls13) {
+        ctx->server_tls12_client_certificate_received = 1;
+        ctx->state = TLS_STATE_SERVER_TLS12_CLIENT_CERTIFICATE_RECEIVED;
+    } else {
+        ctx->state = ctx->is_server
+            ? TLS_STATE_SERVER_CLIENT_CERTIFICATE_RECEIVED
+            : TLS_STATE_CERTIFICATE_RECEIVED;
+    }
     return TLS_HS_ERR_OK;
 }
 
@@ -3153,6 +3474,106 @@ int tls_recv_certificate_verify(tls_handshake_ctx_t* ctx)
     p += 2;
     if (p + sig_len > end || sig_len > 512) return TLS_HS_ERR_UNEXPECTED;
     const u8* sig = p;
+
+    if (!ctx->is_tls13) {
+        if (p + sig_len != end || ctx->transcript_bytes_overflow ||
+            ctx->transcript_bytes_len == 0u)
+            return TLS_HS_ERR_UNEXPECTED;
+
+        int offered = 0;
+        for (u16 index = 0u;
+             index < ctx->client_signature_scheme_count; ++index) {
+            if (ctx->client_signature_schemes[index] == sig_scheme) {
+                offered = 1;
+                break;
+            }
+        }
+        int verify_ok = ctx->verify_none && offered;
+        if (!ctx->verify_none && offered) {
+            u8 hash[64];
+            switch (sig_scheme) {
+            case TLS_SIG_RSA_PKCS1_SHA256:
+                if (ctx->server_key_type == 0) {
+                    sha256(ctx->transcript_bytes, ctx->transcript_bytes_len,
+                           hash);
+                    verify_ok = rsa_pkcs1_verify(
+                        sig, sig_len, hash, 32u, RSA_HASH_SHA256,
+                        &ctx->server_rsa_key) == RSA_OK;
+                }
+                break;
+            case TLS_SIG_RSA_PKCS1_SHA384:
+                if (ctx->server_key_type == 0) {
+                    sha384(ctx->transcript_bytes, ctx->transcript_bytes_len,
+                           hash);
+                    verify_ok = rsa_pkcs1_verify(
+                        sig, sig_len, hash, 48u, RSA_HASH_SHA384,
+                        &ctx->server_rsa_key) == RSA_OK;
+                }
+                break;
+            case TLS_SIG_RSA_PKCS1_SHA512:
+                if (ctx->server_key_type == 0) {
+                    sha512(ctx->transcript_bytes, ctx->transcript_bytes_len,
+                           hash);
+                    verify_ok = rsa_pkcs1_verify(
+                        sig, sig_len, hash, 64u, RSA_HASH_SHA512,
+                        &ctx->server_rsa_key) == RSA_OK;
+                }
+                break;
+            case TLS_SIG_RSA_PSS_RSAE_SHA256:
+                if (ctx->server_key_type == 0) {
+                    sha256(ctx->transcript_bytes, ctx->transcript_bytes_len,
+                           hash);
+                    verify_ok = rsa_pss_verify_sha256(
+                        sig, sig_len, hash, &ctx->server_rsa_key) == RSA_OK;
+                }
+                break;
+            case TLS_SIG_ECDSA_SECP256R1_SHA256:
+                if (ctx->server_key_type == 1 &&
+                    ctx->server_ecdsa_curve == ECDSA_CURVE_P256) {
+                    sha256(ctx->transcript_bytes, ctx->transcript_bytes_len,
+                           hash);
+                    verify_ok = ecdsa_nist_verify(
+                        ECDSA_CURVE_P256, sig, sig_len, hash, 32u,
+                        ctx->server_ecdsa_key,
+                        ctx->server_ecdsa_key_len) == ECDH_OK;
+                }
+                break;
+            case TLS_SIG_ECDSA_SECP384R1_SHA384:
+                if (ctx->server_key_type == 1 &&
+                    ctx->server_ecdsa_curve == ECDSA_CURVE_P384) {
+                    sha384(ctx->transcript_bytes, ctx->transcript_bytes_len,
+                           hash);
+                    verify_ok = ecdsa_nist_verify(
+                        ECDSA_CURVE_P384, sig, sig_len, hash, 48u,
+                        ctx->server_ecdsa_key,
+                        ctx->server_ecdsa_key_len) == ECDH_OK;
+                }
+                break;
+            case TLS_SIG_ECDSA_SECP521R1_SHA512:
+                if (ctx->server_key_type == 1 &&
+                    ctx->server_ecdsa_curve == ECDSA_CURVE_P521) {
+                    sha512(ctx->transcript_bytes, ctx->transcript_bytes_len,
+                           hash);
+                    verify_ok = ecdsa_nist_verify(
+                        ECDSA_CURVE_P521, sig, sig_len, hash, 64u,
+                        ctx->server_ecdsa_key,
+                        ctx->server_ecdsa_key_len) == ECDH_OK;
+                }
+                break;
+            default:
+                break;
+            }
+            rintls_secure_zero(hash, sizeof(hash));
+        }
+        if (!verify_ok) {
+            ctx->last_error = TLS_HS_ERR_SIGNATURE;
+            ctx->state = TLS_STATE_ERROR;
+            return TLS_HS_ERR_SIGNATURE;
+        }
+        tls_transcript_update(ctx, msg, 4u + msg_len);
+        ctx->state = TLS_STATE_SERVER_TLS12_CLIENT_CERTIFICATE_VERIFY_RECEIVED;
+        return TLS_HS_ERR_OK;
+    }
 
     /* RFC 8446 4.4.3: 署名対象はこのメッセージ自身を含まないTranscript-Hash
      * (このメッセージをTranscriptに加える前に取得する必要がある) */
@@ -3424,7 +3845,8 @@ int tls_send_finished(tls_handshake_ctx_t* ctx)
                                                pos,
                                                1,
                                                ctx->is_server
-                                                   ? (ctx->server_client_certificate_required
+                                                   ? (ctx->is_tls13 &&
+                                                      ctx->server_client_certificate_required
                                                       ? TLS_STATE_SERVER_WAIT_CLIENT_CERTIFICATE
                                                       : TLS_STATE_SERVER_FINISHED_SENT)
                                                    : TLS_STATE_FINISHED_SENT);
@@ -3848,27 +4270,21 @@ int tls_recv_server_key_exchange(tls_handshake_ctx_t* ctx)
 
 int tls_recv_server_hello_done(tls_handshake_ctx_t* ctx)
 {
-    u8 msg[256];
-    u8 content_type;
-    u16 record_version;
+    u8 msg[TLS_MAX_PENDING_HANDSHAKE_RECV];
+    u8 message_type = 0u;
+    int len = tls_handshake_recv_message(ctx, msg, sizeof(msg),
+                                         &message_type);
+    if (len < 0) return len;
 
-    int len = tls_record_recv_raw(ctx->record, &content_type, &record_version,
-                                   msg, sizeof(msg));
-    if (len < 0) return tls_handshake_map_io_error(len);
-
-    if (content_type != TLS_CONTENT_HANDSHAKE) {
-        return TLS_HS_ERR_UNEXPECTED;
-    }
-
-    if (len >= 4 && msg[0] == TLS_HS_CERTIFICATE_REQUEST) {
-        /* Parse and fail closed for TLS 1.2 mutual authentication.  The
-         * parser records the request in the transcript so diagnostics remain
-         * faithful, but no unauthenticated client certificate is emitted. */
+    if (message_type == TLS_HS_CERTIFICATE_REQUEST) {
+        /* Parse the TLS 1.2 request. The parser records it and either waits
+         * for an authenticated identity provider or continues with the
+         * configured identity. */
         return tls_recv_certificate_request(ctx, msg, (rin_size_t)len);
     }
-    if (len < 4 || msg[0] != TLS_HS_SERVER_HELLO_DONE) {
+    if (message_type != TLS_HS_SERVER_HELLO_DONE) {
         rintls_debug("[TLS12] Expected ServerHelloDone, got type=");
-        rintls_debug_hex(msg[0]);
+        rintls_debug_hex(message_type);
         rintls_debug("\n");
         return TLS_HS_ERR_UNEXPECTED;
     }
@@ -3891,6 +4307,11 @@ int tls_recv_server_hello_done(tls_handshake_ctx_t* ctx)
 
 int tls_send_client_key_exchange(tls_handshake_ctx_t* ctx)
 {
+    if (!ctx) return TLS_HS_ERR_UNEXPECTED;
+    if (!ctx->is_tls13 && ctx->client_certificate_requested &&
+        !ctx->client_certificate_sent &&
+        ctx->state == TLS_STATE_SERVER_HELLO_DONE)
+        return tls_send_client_certificate(ctx);
     if (ctx->pending_send_kind != TLS_PENDING_SEND_NONE) {
         return tls_handshake_flush_pending_send(ctx, TLS_PENDING_SEND_CLIENT_KEY_EXCHANGE);
     }

@@ -292,7 +292,8 @@ int rintls_set_client_certificate(
      * allowed by the handshake state machine. */
     if (ctx->handshake_started &&
         ctx->handshake.state != TLS_STATE_CLIENT_CERTIFICATE &&
-        ctx->handshake.state != TLS_STATE_ENCRYPTED_EXTENSIONS)
+        ctx->handshake.state != TLS_STATE_ENCRYPTED_EXTENSIONS &&
+        ctx->handshake.state != TLS_STATE_SERVER_KEY_EXCHANGE)
         return RINTLS_ERR_HANDSHAKE;
     int result = tls_handshake_set_client_certificate(
         &ctx->handshake, certificate_list, certificate_list_len,
@@ -315,7 +316,8 @@ int rintls_set_client_certificate_for_scheme(
     if (!ctx) return RINTLS_ERR_MEMORY;
     if (!ctx->handshake_started ||
         (ctx->handshake.state != TLS_STATE_CLIENT_CERTIFICATE &&
-         ctx->handshake.state != TLS_STATE_ENCRYPTED_EXTENSIONS))
+         ctx->handshake.state != TLS_STATE_ENCRYPTED_EXTENSIONS &&
+         ctx->handshake.state != TLS_STATE_SERVER_KEY_EXCHANGE))
         return RINTLS_ERR_HANDSHAKE;
     int result = tls_handshake_set_client_certificate_for_scheme(
         &ctx->handshake, certificate_list, certificate_list_len,
@@ -835,7 +837,16 @@ int rintls_handshake_step(rintls_ctx* ctx)
     case TLS_STATE_SERVER_TLS12_KEY_EXCHANGE_SENT:
         ret = tls_send_server_hello_done(&ctx->handshake);
         break;
+    case TLS_STATE_SERVER_TLS12_CERTIFICATE_REQUEST_SENT:
+        ret = tls_send_server_hello_done(&ctx->handshake);
+        break;
     case TLS_STATE_SERVER_TLS12_HELLO_DONE_SENT:
+        ret = ctx->handshake.server_client_certificate_required &&
+                      !ctx->handshake.server_tls12_client_certificate_received
+            ? tls_recv_certificate(&ctx->handshake)
+            : tls_recv_client_key_exchange(&ctx->handshake);
+        break;
+    case TLS_STATE_SERVER_TLS12_CLIENT_CERTIFICATE_RECEIVED:
         ret = tls_recv_client_key_exchange(&ctx->handshake);
         break;
     case TLS_STATE_SERVER_TLS12_CLIENT_KEY_EXCHANGE_RECEIVED:
@@ -846,6 +857,18 @@ int rintls_handshake_step(rintls_ctx* ctx)
             ctx->handshake.state = TLS_STATE_SERVER_TLS12_KEYS_DERIVED;
         break;
     case TLS_STATE_SERVER_TLS12_KEYS_DERIVED:
+        ret = ctx->handshake.server_client_certificate_required &&
+                      ctx->handshake.server_tls12_client_certificate_received
+            ? tls_recv_certificate_verify(&ctx->handshake)
+            : tls_recv_change_cipher_spec(&ctx->handshake);
+        if (ret == TLS_HS_ERR_OK)
+            ctx->handshake.state =
+                (ctx->handshake.server_client_certificate_required &&
+                 ctx->handshake.server_tls12_client_certificate_received)
+                    ? TLS_STATE_SERVER_TLS12_CLIENT_CERTIFICATE_VERIFY_RECEIVED
+                    : TLS_STATE_SERVER_TLS12_CHANGE_CIPHER_SPEC_RECEIVED;
+        break;
+    case TLS_STATE_SERVER_TLS12_CLIENT_CERTIFICATE_VERIFY_RECEIVED:
         ret = tls_recv_change_cipher_spec(&ctx->handshake);
         if (ret == TLS_HS_ERR_OK)
             ctx->handshake.state =
@@ -896,10 +919,18 @@ int rintls_handshake_step(rintls_ctx* ctx)
     case TLS_STATE_SERVER_HELLO_DONE:
         ret = tls_send_client_key_exchange(&ctx->handshake);
         break;
+    case TLS_STATE_TLS12_CLIENT_CERTIFICATE_SENT:
+        ret = tls_send_client_key_exchange(&ctx->handshake);
+        break;
     case TLS_STATE_CLIENT_KEY_EXCHANGE_SENT:
         ret = tls12_derive_master_secret(&ctx->handshake);
         if (ret == TLS_HS_ERR_OK) ret = tls12_derive_keys(&ctx->handshake);
-        if (ret == TLS_HS_ERR_OK) ret = tls_send_change_cipher_spec(&ctx->handshake);
+        if (ret == TLS_HS_ERR_OK &&
+            ctx->handshake.client_certificate_requested &&
+            !ctx->handshake.client_certificate_declined)
+            ret = tls_send_client_certificate_verify(&ctx->handshake);
+        if (ret == TLS_HS_ERR_OK)
+            ret = tls_send_change_cipher_spec(&ctx->handshake);
         if (ret == TLS_HS_ERR_OK) ret = tls_send_finished(&ctx->handshake);
         break;
     case TLS_STATE_FINISHED_RECEIVED:

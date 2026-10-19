@@ -180,8 +180,9 @@ typedef int (*rintls_client_certificate_sign_func)(
     rin_size_t message_len, u8* signature, rin_size_t signature_capacity,
     rin_size_t* signature_len);
 
-/* Optional authenticated provider invoked exactly once after a TLS 1.3
- * CertificateRequest is received. The provider reads the bounded request
+/* Optional authenticated provider invoked exactly once after a TLS 1.2 or
+ * TLS 1.3 CertificateRequest is received. The provider reads the bounded
+ * request
  * constraints with rintls_get_client_certificate_request(), then installs
  * its public certificate_list and signer with an offered scheme via
  * rintls_set_client_certificate_for_scheme(); private key material never
@@ -228,7 +229,7 @@ typedef int (*rintls_server_certificate_provider_func)(
 #define RINTLS_MAX_CLIENT_SIGNATURE_ALGORITHMS_BYTES (2u + 64u * 2u)
 #define RINTLS_MAX_CLIENT_CERTIFICATE_AUTHORITIES_BYTES 4098u
 
-/* Borrowed TLS 1.3 CertificateRequest constraints. Each vector uses its TLS
+/* Borrowed TLS 1.2/1.3 CertificateRequest constraints. Each vector uses its TLS
  * wire encoding (uint16 vector length followed by uint16 schemes or uint16
  * DistinguishedName length + DER bytes). Pointers remain owned by ctx and
  * are valid until ctx is freed. */
@@ -320,14 +321,16 @@ int rintls_set_cipher_suites(rintls_ctx* ctx, const u16* cipher_suites,
  * immutable after the first handshake step. */
 int rintls_set_trusted_time(rintls_ctx* ctx, u64 trusted_unix_time);
 
-/* Configure a bounded TLS 1.3 Certificate message certificate_list for mutual
- * TLS.  The input is the wire-format certificate_list: a 3-byte total length
- * followed by repeated 3-byte DER length + DER certificate + 2-byte
- * CertificateEntry extensions length (and extension bytes) records.  The
- * signer is invoked after the server's CertificateRequest and must be
- * authenticated by the caller; passing a raw private key is unsupported.
- * For TLS 1.3, a null list with length zero and a null signer explicitly
- * declines the optional request and emits an empty Certificate message. */
+/* Configure a bounded TLS 1.2/1.3 Certificate message certificate_list for
+ * mutual TLS. The input is the TLS 1.3 wire-format certificate_list: a
+ * 3-byte total length followed by repeated 3-byte DER length + DER
+ * certificate + 2-byte CertificateEntry extensions length (and extension
+ * bytes) records. RinTLS removes the per-entry extensions when emitting the
+ * TLS 1.2 certificate message. The signer is invoked after the server's
+ * CertificateRequest and must be authenticated by the caller; passing a raw
+ * private key is unsupported. A null list with length zero and a null signer
+ * explicitly declines the optional request and emits an empty Certificate
+ * message. */
 int rintls_set_client_certificate(
     rintls_ctx* ctx, const void* certificate_list,
     rin_size_t certificate_list_len,
