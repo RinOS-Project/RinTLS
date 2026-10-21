@@ -10,7 +10,7 @@
 #include "../rintls_config.h"
 
 #if defined(RINTLS_USE_COMMON_SECURE_MEMORY)
-#include "../../rinsecure/include/rinsecure/memory.h"
+#include <rinsecure/memory.h>
 #endif
 
 /* Basic Types */
@@ -89,8 +89,8 @@ static inline void rintls_memzero(void* ptr, rin_size_t len) {
 #include <string.h>
 #include <stdlib.h>
 #else
-#include "../../libc/string.h"
-#include "../../libc/stdlib.h"
+#include <string.h>
+#include <stdlib.h>
 #endif
 
 #define rintls_memset   memset
@@ -134,8 +134,8 @@ typedef int rintls_socket_handle;
 #include <sys/socket.h>
 #include <unistd.h>
 #else
-#include "../../libc/sys/socket.h"
-#include "../../libc/unistd.h"
+#include <sys/socket.h>
+#include <unistd.h>
 #endif
 
 #define rintls_tcp_send(sock, data, len)   send((int)(sock), (data), (size_t)(len), 0)
@@ -167,7 +167,7 @@ static inline int rintls_get_random(u8* buf, rin_size_t len) {
 #include <unistd.h>
 #endif
 #else
-#include "../../libc/sys/random.h"
+#include <sys/random.h>
 #endif
 
 static inline int rintls_get_random(u8* buf, rin_size_t len) {

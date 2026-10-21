@@ -104,3 +104,13 @@ for the still-unchecked P1.4 evidence.
 | security | Use only supported provider configurations and authenticated protocol flows. Do not replace certificate/peer policy with successful parsing or handshake progress; applications must verify identity and policy before trusting data. |
 | build | There is no standalone top-level build contract. Build through the consuming RinOS/Ladybird configuration that supplies the required provider and feature profile. |
 | test | A `tests` directory is present and consuming build configurations expose validation targets. This README does not claim every target is available as a standalone test command. |
+
+## RinOS include roots
+
+The RinOS consumer owns the include search path. It supplies
+`public-base/libs/libc` for libc headers and
+`public-base/libs/rinsecure/include` for the `rinsecure/memory.h` contract.
+RinTLS uses ordinary header names such as `<string.h>`, `<errno.h>`, and
+`<rinsecure/memory.h>` so the same source does not depend on the repository's
+relative directory layout. Hosted `RINTLS_HOST_LIBC` builds resolve the
+standard headers from the host toolchain.

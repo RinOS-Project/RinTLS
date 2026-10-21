@@ -16,7 +16,7 @@
 #include <time.h>
 #endif
 #elif defined(RIN_USERSPACE)
-#include "../../libc/time.h"
+#include <time.h>
 #elif !defined(RIN_FREESTANDING)
 #include <time.h>
 #endif

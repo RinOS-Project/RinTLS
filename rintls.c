@@ -10,7 +10,7 @@
 #include "platform/rin_platform.h"
 #include <limits.h>
 #if !defined(RIN_FREESTANDING) || defined(RIN_USERSPACE)
-#include "../libc/errno.h"
+#include <errno.h>
 #endif
 
 /* ═══════════════════════════════════════
