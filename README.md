@@ -110,6 +110,9 @@ for the still-unchecked P1.4 evidence.
 The RinOS consumer owns the include search path. It supplies
 `public-base/libs/libc` for libc headers and
 `public-base/libs/rinsecure/include` for the `rinsecure/memory.h` contract.
+The ML-KEM/ML-DSA wrappers also use the `public-base/libs` and `libs` roots to
+locate their per-variant configuration headers and the namespaced
+`mlkem-native` / `mldsa-native` implementation sources.
 RinTLS uses ordinary header names such as `<string.h>`, `<errno.h>`, and
 `<rinsecure/memory.h>` so the same source does not depend on the repository's
 relative directory layout. Hosted `RINTLS_HOST_LIBC` builds resolve the
