@@ -612,8 +612,24 @@ int bn_mod_exp(bignum_t* r, const bignum_t* base, const bignum_t* exp, const big
 {
     int ret;
 
+    if (!r || !base || !exp || !m || base->used > BIGNUM_MAX_LIMBS ||
+        exp->used > BIGNUM_MAX_LIMBS || m->used > BIGNUM_MAX_LIMBS) {
+        return BIGNUM_ERR_INVALID;
+    }
+
     if (bn_is_zero(m)) {
         return BIGNUM_ERR_DIVZERO;
+    }
+    if (m->sign) return BIGNUM_ERR_INVALID;
+
+    /* Odd moduli, including RSA keys, use bounded Montgomery arithmetic.
+     * Keep the division-based path for even moduli and modulus one. */
+    if (!base->sign && !exp->sign && bn_is_odd(m) && !bn_is_one(m)) {
+        bn_mont_ctx mont;
+        ret = bn_mont_init(&mont, m);
+        if (ret == BIGNUM_OK) ret = bn_mont_exp(r, base, exp, &mont);
+        rintls_secure_zero(&mont, sizeof(mont));
+        return ret;
     }
 
     if (bn_is_zero(exp)) {
@@ -718,97 +734,251 @@ int bn_gcd(bignum_t* r, const bignum_t* a, const bignum_t* b)
  * Montgomery乗算
  * ═══════════════════════════════════════ */
 
+static u32 bn_mont_n_inv(u32 low_limb)
+{
+    u32 inverse = 1u;
+    int iteration;
+
+    /* Newton iteration doubles the number of correct low bits each round. */
+    for (iteration = 0; iteration < 5; ++iteration)
+        inverse *= 2u - low_limb * inverse;
+    return (u32)(0u - inverse);
+}
+
+static int bn_mont_context_valid(const bn_mont_ctx* ctx)
+{
+    return ctx && ctx->n.used != 0u &&
+           ctx->n.used <= BIGNUM_MAX_LIMBS && !ctx->n.sign &&
+           !bn_is_one(&ctx->n) && !bn_is_even(&ctx->n) &&
+           ctx->n_bits == bn_bitlen(&ctx->n) &&
+           ctx->r2.used != 0u && ctx->r2.used <= BIGNUM_MAX_LIMBS &&
+           !ctx->r2.sign && bn_cmp_abs(&ctx->r2, &ctx->n) < 0 &&
+           !bn_is_zero(&ctx->r2) &&
+           ctx->n_inv == bn_mont_n_inv(ctx->n.limbs[0]);
+}
+
 int bn_mont_init(bn_mont_ctx* ctx, const bignum_t* n)
 {
-    bn_copy(&ctx->n, n);
-    ctx->n_bits = bn_bitlen(n);
+    bignum_t modulus;
+    rin_size_t bit;
 
-    /* R = 2^(32*n->used) */
-    /* R^2 mod n を計算 */
-    bignum_t r2;
-    bn_set_u32(&r2, 1);
-    bn_lshift(&r2, &r2, 2 * 32 * n->used);
-    bn_mod(&ctx->r2, &r2, n);
-
-    /* -n^(-1) mod 2^32 を計算 */
-    /* Newton-Raphson法 */
-    u32 n0 = n->limbs[0];
-    u32 x = 1;
-    for (int i = 0; i < 5; i++) {
-        x = x * (2 - n0 * x);
+    if (!ctx) return BIGNUM_ERR_INVALID;
+    if (!n || n->used == 0u || n->used > BIGNUM_MAX_LIMBS || n->sign) {
+        rintls_secure_zero(ctx, sizeof(*ctx));
+        return BIGNUM_ERR_INVALID;
     }
-    ctx->n_inv = (u32)(-(i32)x);
 
+    /* Copy before clearing ctx so initializing from ctx->n is safe. */
+    bn_copy(&modulus, n);
+    bn_normalize(&modulus);
+    rintls_secure_zero(ctx, sizeof(*ctx));
+    if (bn_is_zero(&modulus) || bn_is_one(&modulus) ||
+        bn_is_even(&modulus)) {
+        bn_clear(&modulus);
+        return BIGNUM_ERR_INVALID;
+    }
+
+    bn_copy(&ctx->n, &modulus);
+    ctx->n_bits = bn_bitlen(&ctx->n);
+    ctx->n_inv = bn_mont_n_inv(ctx->n.limbs[0]);
+
+    /* R^2 mod n = 2^(64 * n.used) mod n.  Build it with bounded modular
+     * doublings because the value itself does not fit in bignum_t. */
+    bn_set_u32(&ctx->r2, 1u);
+    for (bit = 0u; bit < 64u * ctx->n.used; ++bit) {
+        int ret = bn_mod_add_reduced(&ctx->r2, &ctx->r2, &ctx->r2,
+                                     &ctx->n);
+        if (ret != BIGNUM_OK) {
+            rintls_secure_zero(ctx, sizeof(*ctx));
+            bn_clear(&modulus);
+            return ret;
+        }
+    }
+    bn_clear(&modulus);
     return BIGNUM_OK;
 }
 
-/* Montgomery簡約 */
-static void bn_mont_reduce(bignum_t* r, bignum_t* t, const bn_mont_ctx* ctx)
+/* Montgomery-reduce a full-width product in place. */
+static int bn_mont_reduce(u32* product, rin_size_t product_limb_count,
+                          const bn_mont_ctx* ctx)
 {
-    for (rin_size_t i = 0; i < ctx->n.used; i++) {
-        u32 m = t->limbs[i] * ctx->n_inv;
+    rin_size_t i;
+    rin_size_t limb_count = ctx->n.used;
 
-        u64 carry = 0;
-        for (rin_size_t j = 0; j < ctx->n.used; j++) {
-            u64 prod = mul_u32(m, ctx->n.limbs[j]) + t->limbs[i + j] + carry;
-            t->limbs[i + j] = (u32)prod;
-            carry = prod >> 32;
+    for (i = 0u; i < limb_count; ++i) {
+        u32 multiple = product[i] * ctx->n_inv;
+        u64 carry = 0u;
+        rin_size_t j;
+
+        for (j = 0u; j < limb_count; ++j) {
+            rin_size_t index = i + j;
+            u64 sum = mul_u32(multiple, ctx->n.limbs[j]) +
+                      product[index] + carry;
+            product[index] = (u32)sum;
+            carry = sum >> 32;
         }
+        for (j = i + limb_count; carry; ++j) {
+            u64 sum;
+            if (j >= product_limb_count) return BIGNUM_ERR_OVERFLOW;
+            sum = (u64)product[j] + carry;
+            product[j] = (u32)sum;
+            carry = sum >> 32;
+        }
+    }
+    return BIGNUM_OK;
+}
 
-        for (rin_size_t j = ctx->n.used; carry && (i + j) < BIGNUM_MAX_LIMBS; j++) {
-            u64 sum = (u64)t->limbs[i + j] + carry;
-            t->limbs[i + j] = (u32)sum;
+int bn_mont_mul(bignum_t* r, const bignum_t* a, const bignum_t* b,
+                const bn_mont_ctx* ctx)
+{
+    u32 product[BIGNUM_MAX_LIMBS * 2u + 2u];
+    bignum_t left;
+    bignum_t right;
+    bignum_t reduced;
+    rin_size_t i;
+    rin_size_t limb_count;
+    rin_size_t product_limb_count = BIGNUM_MAX_LIMBS * 2u + 2u;
+    int ret = BIGNUM_OK;
+
+    if (!r || !a || !b || a->used > BIGNUM_MAX_LIMBS ||
+        b->used > BIGNUM_MAX_LIMBS || a->sign || b->sign ||
+        !bn_mont_context_valid(ctx)) {
+        return BIGNUM_ERR_INVALID;
+    }
+
+    rintls_memset(product, 0, sizeof(product));
+    bn_init(&left);
+    bn_init(&right);
+    bn_init(&reduced);
+    limb_count = ctx->n.used;
+    if (bn_cmp_abs(a, &ctx->n) >= 0)
+        ret = bn_mod(&left, a, &ctx->n);
+    else
+        bn_copy(&left, a);
+    if (ret != BIGNUM_OK) goto cleanup;
+    if (bn_cmp_abs(b, &ctx->n) >= 0)
+        ret = bn_mod(&right, b, &ctx->n);
+    else
+        bn_copy(&right, b);
+    if (ret != BIGNUM_OK) goto cleanup;
+
+    /* Preserve the full 2N-limb product and its carry before reduction. */
+    for (i = 0u; i < left.used; ++i) {
+        u64 carry = 0u;
+        rin_size_t j;
+        for (j = 0u; j < right.used; ++j) {
+            rin_size_t index = i + j;
+            u64 sum = mul_u32(left.limbs[i], right.limbs[j]) +
+                      product[index] + carry;
+            product[index] = (u32)sum;
+            carry = sum >> 32;
+        }
+        for (j = i + right.used; carry; ++j) {
+            u64 sum;
+            if (j >= product_limb_count) {
+                ret = BIGNUM_ERR_OVERFLOW;
+                goto cleanup;
+            }
+            sum = (u64)product[j] + carry;
+            product[j] = (u32)sum;
             carry = sum >> 32;
         }
     }
 
-    /* t >> (32 * n.used) */
-    bn_rshift(r, t, 32 * ctx->n.used);
+    ret = bn_mont_reduce(product, product_limb_count, ctx);
+    if (ret != BIGNUM_OK) goto cleanup;
 
-    /* r >= n なら r -= n */
-    if (bn_cmp_abs(r, &ctx->n) >= 0) {
-        bn_sub_abs(r, r, &ctx->n);
+    /* REDC is < 2n.  When its high limb is one, subtract n from the low
+     * limbs and consume the borrow instead of truncating a 4097-bit value. */
+    reduced.used = limb_count;
+    for (i = 0u; i < limb_count; ++i)
+        reduced.limbs[i] = product[limb_count + i];
+    bn_normalize(&reduced);
+    if (product[limb_count * 2u] != 0u) {
+        u32 high = product[limb_count * 2u];
+        u64 borrow = 0u;
+        if (high != 1u) {
+            ret = BIGNUM_ERR_OVERFLOW;
+            goto cleanup;
+        }
+        for (i = 0u; i < limb_count; ++i) {
+            u64 subtrahend = (u64)ctx->n.limbs[i] + borrow;
+            u64 value = reduced.limbs[i];
+            reduced.limbs[i] = (u32)(value - subtrahend);
+            borrow = value < subtrahend ? 1u : 0u;
+        }
+        if (borrow != high) {
+            ret = BIGNUM_ERR_OVERFLOW;
+            goto cleanup;
+        }
+        bn_normalize(&reduced);
+    } else if (bn_cmp_abs(&reduced, &ctx->n) >= 0) {
+        bn_sub_abs(&reduced, &reduced, &ctx->n);
     }
-}
-
-int bn_mont_mul(bignum_t* r, const bignum_t* a, const bignum_t* b, const bn_mont_ctx* ctx)
-{
-    bignum_t t;
-    bn_mul(&t, a, b);
-    bn_mont_reduce(r, &t, ctx);
-    return BIGNUM_OK;
-}
-
-int bn_mont_exp(bignum_t* r, const bignum_t* base, const bignum_t* exp, const bn_mont_ctx* ctx)
-{
-    if (bn_is_zero(exp)) {
-        bn_set_u32(r, 1);
-        return BIGNUM_OK;
-    }
-
-    /* baseをMontgomery形式に変換: a' = a * R mod n */
-    bignum_t a_mont, result;
-    bn_mod_mul(&a_mont, base, &ctx->r2, &ctx->n);
-
-    /* result = R mod n (1のMontgomery表現) */
-    bignum_t one;
-    bn_set_u32(&one, 1);
-    bn_mod_mul(&result, &one, &ctx->r2, &ctx->n);
-
-    rin_size_t exp_bits = bn_bitlen(exp);
-
-    /* 二乗-乗算法 */
-    for (rin_size_t i = exp_bits; i > 0; i--) {
-        bn_mont_mul(&result, &result, &result, ctx);
-        if (bn_get_bit(exp, i - 1)) {
-            bn_mont_mul(&result, &result, &a_mont, ctx);
+    for (i = limb_count * 2u + 1u; i < product_limb_count; ++i) {
+        if (product[i] != 0u) {
+            ret = BIGNUM_ERR_OVERFLOW;
+            goto cleanup;
         }
     }
+    bn_copy(r, &reduced);
 
-    /* Montgomery形式から通常形式に変換 */
-    bn_mont_mul(r, &result, &one, ctx);
+cleanup:
+    bn_clear(&left);
+    bn_clear(&right);
+    bn_clear(&reduced);
+    rintls_secure_zero(product, sizeof(product));
+    return ret;
+}
 
-    return BIGNUM_OK;
+int bn_mont_exp(bignum_t* r, const bignum_t* base, const bignum_t* exp,
+                const bn_mont_ctx* ctx)
+{
+    bignum_t reduced_base;
+    bignum_t base_mont;
+    bignum_t result;
+    bignum_t one;
+    bignum_t normal_result;
+    rin_size_t bit;
+    int ret;
+
+    if (!r || !base || !exp || base->used > BIGNUM_MAX_LIMBS ||
+        exp->used > BIGNUM_MAX_LIMBS || base->sign || exp->sign ||
+        !bn_mont_context_valid(ctx)) {
+        return BIGNUM_ERR_INVALID;
+    }
+    bn_init(&reduced_base);
+    bn_init(&base_mont);
+    bn_init(&result);
+    bn_init(&one);
+    bn_init(&normal_result);
+
+    ret = bn_mod(&reduced_base, base, &ctx->n);
+    if (ret != BIGNUM_OK) goto cleanup;
+    bn_set_u32(&one, 1u);
+    ret = bn_mont_mul(&base_mont, &reduced_base, &ctx->r2, ctx);
+    if (ret != BIGNUM_OK) goto cleanup;
+    ret = bn_mont_mul(&result, &one, &ctx->r2, ctx);
+    if (ret != BIGNUM_OK) goto cleanup;
+
+    for (bit = bn_bitlen(exp); bit > 0u; --bit) {
+        ret = bn_mont_mul(&result, &result, &result, ctx);
+        if (ret != BIGNUM_OK) goto cleanup;
+        if (bn_get_bit(exp, bit - 1u)) {
+            ret = bn_mont_mul(&result, &result, &base_mont, ctx);
+            if (ret != BIGNUM_OK) goto cleanup;
+        }
+    }
+    ret = bn_mont_mul(&normal_result, &result, &one, ctx);
+    if (ret == BIGNUM_OK) bn_copy(r, &normal_result);
+
+cleanup:
+    bn_clear(&reduced_base);
+    bn_clear(&base_mont);
+    bn_clear(&result);
+    bn_clear(&one);
+    bn_clear(&normal_result);
+    return ret;
 }
 
 /* ═══════════════════════════════════════

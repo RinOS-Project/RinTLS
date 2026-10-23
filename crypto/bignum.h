@@ -163,13 +163,13 @@ typedef struct {
     rin_size_t n_bits;  /* nのビット数 */
 } bn_mont_ctx;
 
-/* Montgomeryコンテキスト初期化 */
+/* Initialize for an odd modulus greater than one; rejects invalid moduli. */
 int bn_mont_init(bn_mont_ctx* ctx, const bignum_t* n);
 
-/* Montgomery乗算: r = (a * b * R^(-1)) mod n */
+/* Montgomery乗算: r = (a * b * R^(-1)) mod n. Inputs must be nonnegative. */
 int bn_mont_mul(bignum_t* r, const bignum_t* a, const bignum_t* b, const bn_mont_ctx* ctx);
 
-/* Montgomery冪乗: r = (base^exp) mod n */
+/* Montgomery冪乗: r = (base^exp) mod n; base and exp must be nonnegative. */
 int bn_mont_exp(bignum_t* r, const bignum_t* base, const bignum_t* exp, const bn_mont_ctx* ctx);
 
 /* ═══════════════════════════════════════
