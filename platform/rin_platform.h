@@ -167,6 +167,7 @@ static inline int rintls_get_random(u8* buf, rin_size_t len) {
 #include <unistd.h>
 #endif
 #else
+#include <errno.h>
 #include <sys/random.h>
 #endif
 

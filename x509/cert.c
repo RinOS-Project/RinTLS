@@ -16,8 +16,10 @@
 #include <time.h>
 #endif
 #elif defined(RIN_USERSPACE)
+#include <sys/time.h>
 #include <time.h>
 #elif !defined(RIN_FREESTANDING)
+#include <sys/time.h>
 #include <time.h>
 #endif
 
