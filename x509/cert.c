@@ -1321,8 +1321,8 @@ void x509_get_current_time(x509_time_t* time)
 #if defined(RINTLS_HOST_LIBC) && defined(_WIN32)
     FILETIME file_time;
     SYSTEMTIME utc;
-    if (!GetSystemTimeAsFileTime(&file_time) ||
-        !FileTimeToSystemTime(&file_time, &utc)) {
+    GetSystemTimeAsFileTime(&file_time);
+    if (!FileTimeToSystemTime(&file_time, &utc)) {
         rintls_memset(time, 0, sizeof(*time));
         return;
     }

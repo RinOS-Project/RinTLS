@@ -512,14 +512,23 @@ static void rintls_free_anchor_list(rintls_trust_anchor* anchor)
 void rintls_trust_store_retain(rintls_trust_store* store)
 {
     if (!store) return;
+#if defined(_WIN32)
+    (void)InterlockedIncrement((volatile LONG*)&store->reference_count);
+#else
     (void)__atomic_add_fetch(&store->reference_count, 1u, __ATOMIC_RELAXED);
+#endif
 }
 
 void rintls_trust_store_release(rintls_trust_store* store)
 {
     if (!store) return;
+#if defined(_WIN32)
+    if (InterlockedDecrement((volatile LONG*)&store->reference_count) != 0)
+        return;
+#else
     if (__atomic_sub_fetch(&store->reference_count, 1u, __ATOMIC_ACQ_REL) != 0)
         return;
+#endif
     rintls_free_anchor_list(store->trust_anchors);
     rintls_secure_zero(store, sizeof(*store));
     rintls_mem_free(store);
@@ -1753,6 +1762,8 @@ static int socket_handle_invalid(rintls_socket_handle sock)
 {
 #if RIN_FREESTANDING
     return sock == NULL;
+#elif defined(_WIN32)
+    return sock == INVALID_SOCKET;
 #else
     return sock < 0;
 #endif
@@ -1766,12 +1777,22 @@ static int socket_send(void* ctx, const u8* data, rin_size_t len)
     {
 #if defined(RIN_FREESTANDING) && !defined(RIN_USERSPACE)
         int ret = rintls_tcp_send(sctx->sock, data, len);
+#elif defined(_WIN32)
+        int ret = rintls_tcp_send(sctx->sock, data, len);
 #else
         ssize_t result = rintls_tcp_send(sctx->sock, data, len);
         if (result > INT_MAX || result < INT_MIN) return RINTLS_ERR_IO;
         int ret = (int)result;
 #endif
-#if !defined(RIN_FREESTANDING) || defined(RIN_USERSPACE)
+#if defined(_WIN32)
+        if (ret == SOCKET_ERROR) {
+            const int socket_error = WSAGetLastError();
+            if (socket_error == WSAEWOULDBLOCK ||
+                socket_error == WSAEINPROGRESS)
+                return TLS_ERR_WANT_WRITE;
+            return RINTLS_ERR_IO;
+        }
+#elif !defined(RIN_FREESTANDING) || defined(RIN_USERSPACE)
         if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS)) {
             return TLS_ERR_WANT_WRITE;
         }
@@ -1792,12 +1813,22 @@ static int socket_recv(void* ctx, u8* data, rin_size_t len)
     {
 #if defined(RIN_FREESTANDING) && !defined(RIN_USERSPACE)
         int ret = rintls_tcp_recv(sctx->sock, data, len);
+#elif defined(_WIN32)
+        int ret = rintls_tcp_recv(sctx->sock, data, len);
 #else
         ssize_t result = rintls_tcp_recv(sctx->sock, data, len);
         if (result > INT_MAX || result < INT_MIN) return RINTLS_ERR_IO;
         int ret = (int)result;
 #endif
-#if !defined(RIN_FREESTANDING) || defined(RIN_USERSPACE)
+#if defined(_WIN32)
+        if (ret == SOCKET_ERROR) {
+            const int socket_error = WSAGetLastError();
+            if (socket_error == WSAEWOULDBLOCK ||
+                socket_error == WSAEINPROGRESS)
+                return TLS_ERR_WANT_READ;
+            return RINTLS_ERR_IO;
+        }
+#elif !defined(RIN_FREESTANDING) || defined(RIN_USERSPACE)
         if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS)) {
             return TLS_ERR_WANT_READ;
         }

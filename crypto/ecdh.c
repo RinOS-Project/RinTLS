@@ -5,6 +5,12 @@
 
 #include "ecdh.h"
 #include "bignum.h"
+
+#if defined(_MSC_VER)
+#define RINTLS_UNUSED
+#else
+#define RINTLS_UNUSED __attribute__((unused))
+#endif
 #include "p256_ct.h"
 #include "hmac.h"
 #include "../platform/rin_platform.h"
@@ -29,7 +35,7 @@ typedef struct {
 } fe25519;
 
 /* p = 2^255 - 19 */
-static const u64 P25519[5] __attribute__((unused)) = {
+static const u64 P25519[5] RINTLS_UNUSED = {
     0x7FFFFFFFFFFED,
     0x7FFFFFFFFFFFF,
     0x7FFFFFFFFFFFF,
@@ -43,7 +49,7 @@ typedef struct {
     u64 hi;
 } u128_t;
 
-static inline void __attribute__((unused)) u128_zero(u128_t* r) {
+static inline void RINTLS_UNUSED u128_zero(u128_t* r) {
     r->lo = 0;
     r->hi = 0;
 }

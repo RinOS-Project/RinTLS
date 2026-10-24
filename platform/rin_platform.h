@@ -128,7 +128,27 @@ extern int tcp_close(RinTCPSocket* sock);
 #define rintls_tcp_recv(sock, buf, len)    tcp_recv((RinTCPSocket*)(sock), (buf), (u32)(len))
 #define rintls_tcp_close(sock)             tcp_close((RinTCPSocket*)(sock))
 #else
-/* Userspace - socket FD API */
+/* Userspace socket handle API. */
+#if defined(_WIN32)
+#include <limits.h>
+#include <winsock2.h>
+typedef SOCKET rintls_socket_handle;
+
+static inline int rintls_tcp_send(rintls_socket_handle sock,
+                                  const void* data, rin_size_t len) {
+    if ((!data && len != 0u) || len > (rin_size_t)INT_MAX) return -1;
+    return send(sock, (const char*)data, (int)len, 0);
+}
+
+static inline int rintls_tcp_recv(rintls_socket_handle sock,
+                                  void* data, rin_size_t len) {
+    if ((!data && len != 0u) || len > (rin_size_t)INT_MAX) return -1;
+    return recv(sock, (char*)data, (int)len, 0);
+}
+
+#define rintls_tcp_close(sock) closesocket((SOCKET)(sock))
+#else
+/* POSIX userspace uses integer file-descriptor sockets. */
 typedef int rintls_socket_handle;
 #if defined(RINTLS_HOST_LIBC)
 #include <sys/socket.h>
@@ -141,6 +161,7 @@ typedef int rintls_socket_handle;
 #define rintls_tcp_send(sock, data, len)   send((int)(sock), (data), (size_t)(len), 0)
 #define rintls_tcp_recv(sock, buf, len)    recv((int)(sock), (buf), (size_t)(len), 0)
 #define rintls_tcp_close(sock)             close((int)(sock))
+#endif
 #endif
 
 /* Random Number Generation */
