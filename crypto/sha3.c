@@ -364,11 +364,12 @@ int sha3_kmac_init(sha3_ctx* ctx, u32 rate, const u8* key,
     sha3_xof_init(ctx, rate, 0x04u);
     if (!sha3_cshake_prefix(ctx, rate, customization, customization_len) ||
         !sha3_append_bytepad(ctx, rate, key, key_len)) return 0;
-    ctx->squeezing = (u8)(xof != 0 ? 0 : 0);
+    (void)xof;
+    ctx->squeezing = 0u;
     return 1;
 }
 
-int sha3_kmac_finalize(sha3_ctx* ctx, u8* output, rin_size_t output_len,
+int sha3_kmac_finalize(const sha3_ctx* ctx, u8* output, rin_size_t output_len,
                        int xof)
 {
     sha3_ctx copy;

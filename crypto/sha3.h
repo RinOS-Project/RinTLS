@@ -44,7 +44,7 @@ int sha3_xof_squeeze(sha3_ctx* ctx, u8* output, rin_size_t output_len);
 int sha3_kmac_init(sha3_ctx* ctx, u32 rate, const u8* key, rin_size_t key_len,
                    const u8* customization, rin_size_t customization_len,
                    int xof);
-int sha3_kmac_finalize(sha3_ctx* ctx, u8* output, rin_size_t output_len,
+int sha3_kmac_finalize(const sha3_ctx* ctx, u8* output, rin_size_t output_len,
                        int xof);
 
 #ifdef __cplusplus
