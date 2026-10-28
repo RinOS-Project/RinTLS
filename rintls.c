@@ -250,6 +250,8 @@ int rintls_set_options(rintls_ctx* ctx, u32 options)
     ctx->options = options;
     ctx->handshake.is_server = (options & RINTLS_OPT_SERVER) ? 1 : 0;
     ctx->handshake.verify_none = (options & RINTLS_OPT_VERIFY_NONE) ? 1 : 0;
+    ctx->handshake.alpn_http11_enabled =
+        (options & RINTLS_OPT_ALPN_HTTP11) != 0u;
     tls_handshake_set_version_policy(
         &ctx->handshake,
         (options & RINTLS_OPT_TLS_1_3_ONLY) == 0u,
