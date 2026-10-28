@@ -831,7 +831,7 @@ int tls_send_server_hello(tls_handshake_ctx_t* ctx)
         rin_size_t extensions_length_pos = pos;
         pos += 2u;
         rin_size_t extensions_start = pos;
-        if (ctx->peer_offered_http11) {
+        if (ctx->alpn_http11_enabled && ctx->peer_offered_http11) {
             write_u16(msg + pos, TLS_EXT_ALPN);
             pos += 2u;
             write_u16(msg + pos, 11u);
@@ -913,7 +913,7 @@ int tls_send_server_encrypted_extensions(tls_handshake_ctx_t* ctx)
     rin_size_t extension_length_pos = pos;
     pos += 2u;
     rin_size_t extension_start = pos;
-    if (ctx->peer_offered_http11) {
+    if (ctx->alpn_http11_enabled && ctx->peer_offered_http11) {
         write_u16(msg + pos, TLS_EXT_ALPN);
         pos += 2u;
         write_u16(msg + pos, 11u);
@@ -2160,15 +2160,17 @@ int tls_send_client_hello(tls_handshake_ctx_t* ctx)
     }
 
     /* 拡張: ALPN (Application-Layer Protocol Negotiation) */
-    write_u16(msg + pos, TLS_EXT_ALPN);
-    pos += 2;
-    write_u16(msg + pos, 11);  /* 拡張データ長: 2 + 1 + 8 = 11 */
-    pos += 2;
-    write_u16(msg + pos, 9);   /* プロトコル名リスト長: 1 + 8 = 9 */
-    pos += 2;
-    msg[pos++] = 8;            /* "http/1.1" の長さ */
-    rintls_memcpy(msg + pos, "http/1.1", 8);
-    pos += 8;
+    if (ctx->alpn_http11_enabled) {
+        write_u16(msg + pos, TLS_EXT_ALPN);
+        pos += 2;
+        write_u16(msg + pos, 11);  /* 拡張データ長: 2 + 1 + 8 = 11 */
+        pos += 2;
+        write_u16(msg + pos, 9);   /* プロトコル名リスト長: 1 + 8 = 9 */
+        pos += 2;
+        msg[pos++] = 8;            /* "http/1.1" の長さ */
+        rintls_memcpy(msg + pos, "http/1.1", 8);
+        pos += 8;
+    }
 
     /* 拡張長を埋める */
     write_u16(msg + ext_length_pos, pos - ext_start);

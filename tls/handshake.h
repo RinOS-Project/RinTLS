@@ -224,6 +224,7 @@ typedef struct {
     u16 peer_key_share_group;
     u8 peer_key_share[65];
     rin_size_t peer_key_share_len;
+    int alpn_http11_enabled;
     int peer_offered_http11;
     int client_hello_received;
     u16 named_group;

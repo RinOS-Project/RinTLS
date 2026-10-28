@@ -162,6 +162,7 @@ _Static_assert(sizeof(rintls_revocation_evidence) == 136u,
 #define RINTLS_OPT_TLS_1_2_ONLY         0x0002  /* TLS 1.2のみ */
 #define RINTLS_OPT_TLS_1_3_ONLY         0x0004  /* TLS 1.3のみ */
 #define RINTLS_OPT_SERVER               0x0008  /* TLS server endpoint */
+#define RINTLS_OPT_ALPN_HTTP11          0x0010  /* HTTP/1.1 ALPNを広告・選択 */
 
 /* ═══════════════════════════════════════
  * コンテキスト (不透明型)
