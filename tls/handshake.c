@@ -386,7 +386,7 @@ static int tls_parse_selected_alpn(tls_handshake_ctx_t* ctx,
     u16 protocol_list_len;
     u8 protocol_len;
 
-    if (!ctx || !extension || extension_len < 3u ||
+    if (!ctx || !ctx->alpn_http11_enabled || !extension || extension_len < 3u ||
         ctx->negotiated_alpn_len != 0u) {
         return TLS_HS_ERR_UNEXPECTED;
     }
