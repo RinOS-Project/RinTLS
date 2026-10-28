@@ -323,6 +323,9 @@ typedef struct {
     u16 server_signature_scheme;
     int server_certificate_configured;
     int server_client_certificate_required;
+    u8 server_client_certificate_authorities[
+        TLS_MAX_CLIENT_CERTIFICATE_AUTHORITIES_BYTES];
+    rin_size_t server_client_certificate_authorities_len;
 
     /* SNI */
     char server_name[256];
@@ -400,6 +403,9 @@ int tls_handshake_set_server_certificate_for_scheme(
 
 int tls_handshake_set_server_client_certificate_required(
     tls_handshake_ctx_t* ctx, int required);
+int tls_handshake_set_server_client_certificate_authorities(
+    tls_handshake_ctx_t* ctx, const void* authorities,
+    rin_size_t authorities_len);
 
 int tls_handshake_client_certificate_requested(const tls_handshake_ctx_t* ctx);
 int tls_handshake_get_client_certificate_request(

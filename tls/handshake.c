@@ -985,6 +985,20 @@ int tls_send_server_certificate_request(tls_handshake_ctx_t* ctx)
     write_u16(msg + schemes_start, (u16)(scheme_count * 2u));
     write_u16(msg + extension_data_length_pos,
               (u16)(2u + scheme_count * 2u));
+    if (ctx->server_client_certificate_authorities_len != 0u) {
+        rin_size_t authorities_len =
+            ctx->server_client_certificate_authorities_len;
+        if (authorities_len > 0xffffu ||
+            pos > sizeof(msg) - 4u - authorities_len)
+            return TLS_HS_ERR_CERTIFICATE;
+        write_u16(msg + pos, TLS_EXT_CERTIFICATE_AUTHORITIES);
+        pos += 2u;
+        write_u16(msg + pos, (u16)authorities_len);
+        pos += 2u;
+        rintls_memcpy(msg + pos, ctx->server_client_certificate_authorities,
+                      authorities_len);
+        pos += authorities_len;
+    }
     write_u16(msg + extensions_length_pos, (u16)(pos - extensions_start));
     write_u24(msg + length_pos, (u32)(pos - body_start));
     const int result = tls_handshake_stage_pending_send(
@@ -1259,7 +1273,7 @@ int tls_send_server_hello_done(tls_handshake_ctx_t* ctx)
             TLS_SIG_RSA_PKCS1_SHA256,
             TLS_SIG_ECDSA_SECP256R1_SHA256
         };
-        u8 request[256];
+        u8 request[TLS_MAX_PENDING_HANDSHAKE_SEND];
         rin_size_t pos = 0u;
         rin_size_t length_pos;
         rin_size_t body_start;
@@ -1287,8 +1301,20 @@ int tls_send_server_hello_done(tls_handshake_ctx_t* ctx)
         }
         if (sig_count == 0u) return TLS_HS_ERR_SIGNATURE;
         write_u16(request + sig_list_start, (u16)(sig_count * 2u));
-        write_u16(request + pos, 0u); /* empty certificate_authorities */
-        pos += 2u;
+        if (ctx->server_client_certificate_authorities_len != 0u) {
+            rin_size_t authorities_len =
+                ctx->server_client_certificate_authorities_len;
+            if (authorities_len > 0xffffu ||
+                pos > sizeof(request) - authorities_len)
+                return TLS_HS_ERR_CERTIFICATE;
+            rintls_memcpy(request + pos,
+                          ctx->server_client_certificate_authorities,
+                          authorities_len);
+            pos += authorities_len;
+        } else {
+            write_u16(request + pos, 0u);
+            pos += 2u;
+        }
         write_u24(request + length_pos, (u32)(pos - body_start));
         int request_result = tls_handshake_stage_pending_send(
             ctx, TLS_PENDING_SEND_SERVER_HELLO_DONE, 0,
@@ -1675,6 +1701,42 @@ int tls_handshake_set_server_client_certificate_required(
         (required != 0 && required != 1))
         return TLS_HS_ERR_CERTIFICATE;
     ctx->server_client_certificate_required = required;
+    return TLS_HS_ERR_OK;
+}
+
+int tls_handshake_set_server_client_certificate_authorities(
+    tls_handshake_ctx_t* ctx, const void* authorities,
+    rin_size_t authorities_len)
+{
+    const u8* bytes = (const u8*)authorities;
+    rin_size_t offset = 2u;
+
+    if (!ctx || ctx->state != TLS_STATE_INIT || !ctx->is_server ||
+        (authorities_len != 0u && !authorities) ||
+        authorities_len > TLS_MAX_CLIENT_CERTIFICATE_AUTHORITIES_BYTES)
+        return TLS_HS_ERR_CERTIFICATE;
+    if (authorities_len == 0u) {
+        ctx->server_client_certificate_authorities_len = 0u;
+        return TLS_HS_ERR_OK;
+    }
+    if (authorities_len < 2u || read_u16(bytes) != authorities_len - 2u)
+        return TLS_HS_ERR_CERTIFICATE;
+    while (offset < authorities_len) {
+        rin_size_t distinguished_name_len;
+        if (authorities_len - offset < 2u)
+            return TLS_HS_ERR_CERTIFICATE;
+        distinguished_name_len = read_u16(bytes + offset);
+        offset += 2u;
+        if (distinguished_name_len == 0u ||
+            distinguished_name_len > authorities_len - offset)
+            return TLS_HS_ERR_CERTIFICATE;
+        offset += distinguished_name_len;
+    }
+    if (offset != authorities_len)
+        return TLS_HS_ERR_CERTIFICATE;
+    rintls_memcpy(ctx->server_client_certificate_authorities, bytes,
+                  authorities_len);
+    ctx->server_client_certificate_authorities_len = authorities_len;
     return TLS_HS_ERR_OK;
 }
 

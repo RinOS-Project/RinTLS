@@ -419,6 +419,17 @@ int rintls_set_server_client_certificate_required(
         ? RINTLS_OK : RINTLS_ERR_CERTIFICATE;
 }
 
+int rintls_set_server_client_certificate_authorities(
+    rintls_ctx* ctx, const void* authorities, rin_size_t authorities_len)
+{
+    if (!ctx) return RINTLS_ERR_MEMORY;
+    if ((ctx->options & RINTLS_OPT_SERVER) == 0u || ctx->handshake_started)
+        return RINTLS_ERR_HANDSHAKE;
+    return tls_handshake_set_server_client_certificate_authorities(
+               &ctx->handshake, authorities, authorities_len) == TLS_HS_ERR_OK
+        ? RINTLS_OK : RINTLS_ERR_CERTIFICATE;
+}
+
 int rintls_get_server_client_hello(
     const rintls_ctx* ctx, rintls_server_client_hello* client_hello)
 {

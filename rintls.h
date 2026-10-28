@@ -369,6 +369,12 @@ int rintls_set_server_certificate_provider(
     void* provider_opaque);
 int rintls_set_server_client_certificate_required(
     rintls_ctx* ctx, int required);
+/* Configure the TLS 1.2/1.3 client-certificate authority vector. The input is
+ * the TLS certificate_authorities vector itself: a two-byte total length
+ * followed by repeated two-byte DistinguishedName length + DER Name records.
+ * An empty input omits the extension and emits the TLS 1.2 empty vector. */
+int rintls_set_server_client_certificate_authorities(
+    rintls_ctx* ctx, const void* authorities, rin_size_t authorities_len);
 int rintls_get_server_client_hello(
     const rintls_ctx* ctx, rintls_server_client_hello* client_hello);
 
