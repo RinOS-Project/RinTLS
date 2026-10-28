@@ -1715,6 +1715,38 @@ static int nist_public_point_is_valid(const p256_point_t* point,
     return bn_cmp(&lhs, &rhs) == 0;
 }
 
+int ecdsa_nist_validate_public(int curve,
+                               const u8* public_key,
+                               rin_size_t public_key_len)
+{
+    nist_curve_t parameters;
+    bignum_t prime;
+    p256_point_t point;
+    rin_size_t width;
+    int result = ECDH_ERR_INVALID;
+
+    if (curve == ECDSA_CURVE_P256)
+        return p256_validate_public(public_key, public_key_len);
+    if (!public_key || nist_curve_parameters(curve, &parameters) != ECDH_OK)
+        return ECDH_ERR_INVALID;
+
+    width = parameters.coordinate_size;
+    if (public_key_len != 1u + width * 2u || public_key[0] != 0x04u)
+        return ECDH_ERR_POINT;
+
+    bn_from_bytes(&point.x, public_key + 1u, width);
+    bn_from_bytes(&point.y, public_key + 1u + width, width);
+    point.infinity = 0;
+    bn_from_bytes(&prime, parameters.p, width);
+    if (nist_public_point_is_valid(&point, &prime,
+                                   parameters.b, parameters.b_size))
+        result = ECDH_OK;
+    bn_clear(&point.x);
+    bn_clear(&point.y);
+    bn_clear(&prime);
+    return result;
+}
+
 int ecdsa_nist_verify(int curve,
                       const u8* signature, rin_size_t sig_len,
                       const u8* hash, rin_size_t hash_len,

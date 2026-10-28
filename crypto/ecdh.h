@@ -110,6 +110,11 @@ int ecdsa_nist_public_from_private(int curve,
                                    const u8* private_key,
                                    rin_size_t private_key_len);
 
+/* Validate an uncompressed NIST public point for P-256/P-384/P-521. */
+int ecdsa_nist_validate_public(int curve,
+                               const u8* public_key,
+                               rin_size_t public_key_len);
+
 /* Verify an ECDSA signature using an uncompressed NIST P-256/P-384/P-521 key. */
 int ecdsa_nist_verify(int curve,
                       const u8* signature, rin_size_t sig_len,
