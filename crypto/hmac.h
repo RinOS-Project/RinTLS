@@ -8,6 +8,7 @@
 
 #include "../platform/rin_platform.h"
 #include "sha256.h"
+#include "sha3.h"
 
 /* HMAC-SHA256 */
 #define HMAC_SHA256_SIZE    32
@@ -50,6 +51,41 @@ void hmac_sha512_init(hmac_sha512_ctx* ctx, const u8* key, rin_size_t key_len);
 void hmac_sha512_update(hmac_sha512_ctx* ctx, const u8* data, rin_size_t len);
 void hmac_sha512_final(hmac_sha512_ctx* ctx, u8* mac);
 void hmac_sha512(const u8* key, rin_size_t key_len, const u8* data, rin_size_t data_len, u8* mac);
+
+/* HMAC-SHA3 (RFC 2104 construction over FIPS 202 SHA3). */
+#define HMAC_SHA3_256_SIZE SHA3_256_DIGEST_SIZE
+#define HMAC_SHA3_384_SIZE SHA3_384_DIGEST_SIZE
+#define HMAC_SHA3_512_SIZE SHA3_512_DIGEST_SIZE
+
+typedef struct {
+    sha3_ctx inner;
+    sha3_ctx outer;
+    u8 key_block[SHA3_256_RATE];
+} hmac_sha3_256_ctx;
+
+typedef struct {
+    sha3_ctx inner;
+    sha3_ctx outer;
+    u8 key_block[SHA3_384_RATE];
+} hmac_sha3_384_ctx;
+
+typedef struct {
+    sha3_ctx inner;
+    sha3_ctx outer;
+    u8 key_block[SHA3_512_RATE];
+} hmac_sha3_512_ctx;
+
+void hmac_sha3_256_init(hmac_sha3_256_ctx* ctx, const u8* key, rin_size_t key_len);
+void hmac_sha3_256_update(hmac_sha3_256_ctx* ctx, const u8* data, rin_size_t len);
+void hmac_sha3_256_final(hmac_sha3_256_ctx* ctx, u8* mac);
+
+void hmac_sha3_384_init(hmac_sha3_384_ctx* ctx, const u8* key, rin_size_t key_len);
+void hmac_sha3_384_update(hmac_sha3_384_ctx* ctx, const u8* data, rin_size_t len);
+void hmac_sha3_384_final(hmac_sha3_384_ctx* ctx, u8* mac);
+
+void hmac_sha3_512_init(hmac_sha3_512_ctx* ctx, const u8* key, rin_size_t key_len);
+void hmac_sha3_512_update(hmac_sha3_512_ctx* ctx, const u8* data, rin_size_t len);
+void hmac_sha3_512_final(hmac_sha3_512_ctx* ctx, u8* mac);
 
 /* ═══════════════════════════════════════
  * HKDF (HMAC-based Key Derivation Function)

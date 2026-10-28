@@ -246,6 +246,121 @@ void hmac_sha512(const u8* key, rin_size_t key_len,
 }
 
 /* ═══════════════════════════════════════
+ * HMAC-SHA3 (RFC 2104 over FIPS 202)
+ * ═══════════════════════════════════════ */
+
+static void hmac_sha3_init_hash(sha3_ctx* ctx, u32 rate)
+{
+    if (rate == SHA3_256_RATE) {
+        sha3_256_init(ctx);
+    } else if (rate == SHA3_384_RATE) {
+        sha3_384_init(ctx);
+    } else {
+        sha3_512_init(ctx);
+    }
+}
+
+static void hmac_sha3_init_common(sha3_ctx* inner, sha3_ctx* outer,
+                                  u8* key_block, u32 rate, u32 digest_size,
+                                  const u8* key, rin_size_t key_len)
+{
+    u8 key_pad[SHA3_256_RATE];
+    u8 ipad[SHA3_256_RATE];
+    u8 opad[SHA3_256_RATE];
+    rin_size_t index;
+
+    rintls_memset(key_pad, 0, rate);
+    if (key_len > rate) {
+        sha3_ctx key_hash;
+        u8 digest[SHA3_512_DIGEST_SIZE];
+        hmac_sha3_init_hash(&key_hash, rate);
+        sha3_update(&key_hash, key, key_len);
+        sha3_final(&key_hash, digest);
+        rintls_memcpy(key_pad, digest, digest_size);
+        rintls_secure_zero(&key_hash, sizeof(key_hash));
+        rintls_secure_zero(digest, sizeof(digest));
+    } else if (key_len != 0u) {
+        rintls_memcpy(key_pad, key, key_len);
+    }
+
+    rintls_memcpy(key_block, key_pad, rate);
+    for (index = 0u; index < rate; ++index) {
+        ipad[index] = key_pad[index] ^ 0x36u;
+        opad[index] = key_pad[index] ^ 0x5cu;
+    }
+
+    hmac_sha3_init_hash(inner, rate);
+    sha3_update(inner, ipad, rate);
+    hmac_sha3_init_hash(outer, rate);
+    sha3_update(outer, opad, rate);
+
+    rintls_secure_zero(key_pad, sizeof(key_pad));
+    rintls_secure_zero(ipad, sizeof(ipad));
+    rintls_secure_zero(opad, sizeof(opad));
+}
+
+static void hmac_sha3_final_common(sha3_ctx* inner, sha3_ctx* outer,
+                                   u8* mac, u32 digest_size)
+{
+    u8 inner_hash[SHA3_512_DIGEST_SIZE];
+    sha3_final(inner, inner_hash);
+    sha3_update(outer, inner_hash, digest_size);
+    sha3_final(outer, mac);
+    rintls_secure_zero(inner_hash, sizeof(inner_hash));
+}
+
+void hmac_sha3_256_init(hmac_sha3_256_ctx* ctx, const u8* key, rin_size_t key_len)
+{
+    hmac_sha3_init_common(&ctx->inner, &ctx->outer, ctx->key_block,
+                          SHA3_256_RATE, SHA3_256_DIGEST_SIZE, key, key_len);
+}
+
+void hmac_sha3_256_update(hmac_sha3_256_ctx* ctx, const u8* data, rin_size_t len)
+{
+    sha3_update(&ctx->inner, data, len);
+}
+
+void hmac_sha3_256_final(hmac_sha3_256_ctx* ctx, u8* mac)
+{
+    hmac_sha3_final_common(&ctx->inner, &ctx->outer, mac,
+                           SHA3_256_DIGEST_SIZE);
+}
+
+void hmac_sha3_384_init(hmac_sha3_384_ctx* ctx, const u8* key, rin_size_t key_len)
+{
+    hmac_sha3_init_common(&ctx->inner, &ctx->outer, ctx->key_block,
+                          SHA3_384_RATE, SHA3_384_DIGEST_SIZE, key, key_len);
+}
+
+void hmac_sha3_384_update(hmac_sha3_384_ctx* ctx, const u8* data, rin_size_t len)
+{
+    sha3_update(&ctx->inner, data, len);
+}
+
+void hmac_sha3_384_final(hmac_sha3_384_ctx* ctx, u8* mac)
+{
+    hmac_sha3_final_common(&ctx->inner, &ctx->outer, mac,
+                           SHA3_384_DIGEST_SIZE);
+}
+
+void hmac_sha3_512_init(hmac_sha3_512_ctx* ctx, const u8* key, rin_size_t key_len)
+{
+    hmac_sha3_init_common(&ctx->inner, &ctx->outer, ctx->key_block,
+                          SHA3_512_RATE, SHA3_512_DIGEST_SIZE, key, key_len);
+}
+
+void hmac_sha3_512_update(hmac_sha3_512_ctx* ctx, const u8* data, rin_size_t len)
+{
+    sha3_update(&ctx->inner, data, len);
+}
+
+void hmac_sha3_512_final(hmac_sha3_512_ctx* ctx, u8* mac)
+{
+    hmac_sha3_final_common(&ctx->inner, &ctx->outer, mac,
+                           SHA3_512_DIGEST_SIZE);
+}
+
+/* ═══════════════════════════════════════
  * HKDF-SHA256 (RFC 5869)
  * ═══════════════════════════════════════ */
 

@@ -15,6 +15,9 @@ extern "C" {
 #define SHA3_256_DIGEST_SIZE 32u
 #define SHA3_384_DIGEST_SIZE 48u
 #define SHA3_512_DIGEST_SIZE 64u
+#define SHA3_256_RATE 136u
+#define SHA3_384_RATE 104u
+#define SHA3_512_RATE 72u
 
 typedef struct {
     u64 state[25];
