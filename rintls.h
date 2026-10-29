@@ -78,6 +78,8 @@ extern "C" {
  * its terminating NUL; longer or unterminated input is rejected. */
 #define RINTLS_MAX_HOSTNAME_BYTES 254u
 #define RINTLS_MAX_CIPHER_SUITES 8u
+#define RINTLS_IP_FAMILY_IPV4 4
+#define RINTLS_IP_FAMILY_IPV6 6
 
 typedef struct rintls_peer_evidence {
     u32 struct_size;
@@ -294,6 +296,11 @@ void rintls_free(rintls_ctx* ctx);
  * TLS接続前に設定必須
  */
 int rintls_set_hostname(rintls_ctx* ctx, const char* hostname);
+
+/* Bind certificate verification to an IPv4/IPv6 iPAddress subjectAltName.
+ * The address is binary and is deliberately not sent as TLS SNI. */
+int rintls_set_ip_address(rintls_ctx* ctx, int address_family,
+                          const u8* address, rin_size_t address_length);
 
 /*
  * I/Oコールバックを設定

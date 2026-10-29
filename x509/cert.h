@@ -242,6 +242,11 @@ int x509_check_validity_at(const x509_cert_t* cert, u64 unix_time);
 /* ホスト名をチェック (CNまたはSAN) */
 int x509_check_hostname(const x509_cert_t* cert, const char* hostname);
 
+/* Match an IPv4 (family 4, length 4) or IPv6 (family 6, length 16)
+ * address against an iPAddress GeneralName in subjectAltName. */
+int x509_check_ip_address(const x509_cert_t* cert, int address_family,
+                          const u8* address, rin_size_t address_length);
+
 /* Match the identity of a cross-signed CA certificate against a configured
  * trust anchor.  Both the DER-encoded subject and the complete public key
  * must be identical. */

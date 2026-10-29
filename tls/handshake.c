@@ -1456,6 +1456,24 @@ void tls_handshake_set_server_name(tls_handshake_ctx_t* ctx, const char* name)
     ctx->server_name[len] = '\0';
 }
 
+void tls_handshake_set_peer_ip_address(tls_handshake_ctx_t* ctx,
+                                       int address_family,
+                                       const u8* address)
+{
+    if (!ctx) return;
+    rintls_memset(ctx->peer_ip_address, 0, sizeof(ctx->peer_ip_address));
+    ctx->peer_ip_address_family = 0u;
+    if (address_family == 4 && address) {
+        rintls_memcpy(ctx->peer_ip_address, address, 4u);
+        ctx->peer_ip_address_family = 4u;
+    } else if (address_family == 6 && address) {
+        rintls_memcpy(ctx->peer_ip_address, address, 16u);
+        ctx->peer_ip_address_family = 6u;
+    }
+    if (ctx->peer_ip_address_family != 0u)
+        tls_handshake_set_server_name(ctx, "");
+}
+
 void tls_handshake_set_version_policy(tls_handshake_ctx_t* ctx,
                                       int allow_tls12, int allow_tls13)
 {
@@ -3435,7 +3453,18 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
         }
 
         if (cert_index == 0) {
-            if (!ctx->is_server && ctx->server_name[0] != '\0' &&
+            if (!ctx->is_server && ctx->peer_ip_address_family != 0u &&
+                x509_check_ip_address(
+                    cur, ctx->peer_ip_address_family,
+                    ctx->peer_ip_address,
+                    ctx->peer_ip_address_family == 4u ? 4u : 16u) !=
+                    X509_OK) {
+                rintls_debug("[TLS] Certificate IP identity mismatch\n");
+                chain_err = TLS_HS_ERR_HOSTNAME;
+                break;
+            }
+            if (!ctx->is_server && ctx->peer_ip_address_family == 0u &&
+                ctx->server_name[0] != '\0' &&
                 x509_check_hostname(cur, ctx->server_name) != X509_OK) {
                 rintls_debug("[TLS] Certificate hostname mismatch\n");
                 chain_err = TLS_HS_ERR_HOSTNAME;

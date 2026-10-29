@@ -1553,6 +1553,33 @@ int x509_check_hostname(const x509_cert_t* cert, const char* hostname)
     return X509_ERR_NAME;
 }
 
+int x509_check_ip_address(const x509_cert_t* cert, int address_family,
+                          const u8* address, rin_size_t address_length)
+{
+    const rin_size_t expected_length = address_family == 4 ? 4u :
+                                       address_family == 6 ? 16u : 0u;
+    const u8* san_p;
+    const u8* san_end;
+    if (!cert || !address || expected_length == 0u ||
+        address_length != expected_length || !cert->san_names_data ||
+        cert->san_names_len == 0u)
+        return X509_ERR_NAME;
+
+    san_p = cert->san_names_data;
+    san_end = san_p + cert->san_names_len;
+    while (san_p < san_end) {
+        u8 tag;
+        rin_size_t length;
+        if (asn1_read_tag(&san_p, san_end, &tag, &length) < 0)
+            return X509_ERR_NAME;
+        if (tag == 0x87 && length == expected_length &&
+            rintls_memcmp(san_p, address, expected_length) == 0)
+            return X509_OK;
+        san_p += length;
+    }
+    return X509_ERR_NAME;
+}
+
 int x509_trust_identity_matches(const x509_cert_t* candidate,
                                 const x509_cert_t* trusted)
 {

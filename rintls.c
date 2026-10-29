@@ -8,6 +8,7 @@
 #include "tls/handshake.h"
 #include "x509/cert.h"
 #include "platform/rin_platform.h"
+#include <rin/net/ipv6_text.h>
 #include <limits.h>
 #if !defined(RIN_FREESTANDING) || defined(RIN_USERSPACE)
 #include <errno.h>
@@ -209,9 +210,59 @@ int rintls_set_hostname(rintls_ctx* ctx, const char* hostname)
 
     rintls_memset(ctx->hostname, 0, sizeof(ctx->hostname));
     rintls_memcpy(ctx->hostname, hostname, len);
+    tls_handshake_set_peer_ip_address(&ctx->handshake, 0, RIN_NULL);
 
     tls_handshake_set_server_name(&ctx->handshake, hostname);
 
+    return RINTLS_OK;
+}
+
+static int rintls_format_ipv4_address(const u8 address[4], char output[16])
+{
+    rin_size_t size = 0u;
+    unsigned int index;
+    for (index = 0u; index < 4u; ++index) {
+        u8 value = address[index];
+        char digits[3];
+        unsigned int count = 0u;
+        do {
+            digits[count++] = (char)('0' + value % 10u);
+            value = (u8)(value / 10u);
+        } while (value != 0u);
+        if (index != 0u) output[size++] = '.';
+        while (count != 0u) output[size++] = digits[--count];
+    }
+    output[size] = '\0';
+    return 0;
+}
+
+int rintls_set_ip_address(rintls_ctx* ctx, int address_family,
+                          const u8* address, rin_size_t address_length)
+{
+    char formatted[46];
+    rin_size_t formatted_length = 0u;
+    if (!ctx || !address || ctx->handshake_started)
+        return RINTLS_ERR_HOSTNAME;
+    if (address_family == RINTLS_IP_FAMILY_IPV4) {
+        if (address_length != 4u) return RINTLS_ERR_HOSTNAME;
+        (void)rintls_format_ipv4_address(address, formatted);
+    } else if (address_family == RINTLS_IP_FAMILY_IPV6) {
+        if (address_length != 16u ||
+            rin_ipv6_text_format(address, formatted, sizeof(formatted)) != 0)
+            return RINTLS_ERR_HOSTNAME;
+    } else {
+        return RINTLS_ERR_HOSTNAME;
+    }
+    while (formatted_length < sizeof(formatted) &&
+           formatted[formatted_length] != '\0')
+        ++formatted_length;
+    if (formatted_length == 0u || formatted_length >= sizeof(ctx->hostname))
+        return RINTLS_ERR_HOSTNAME;
+    rintls_memset(ctx->hostname, 0, sizeof(ctx->hostname));
+    rintls_memcpy(ctx->hostname, formatted, formatted_length + 1u);
+    tls_handshake_set_peer_ip_address(
+        &ctx->handshake, address_family, address);
+    /* An IP address is a certificate identity, never a DNS SNI value. */
     return RINTLS_OK;
 }
 

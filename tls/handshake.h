@@ -330,6 +330,10 @@ typedef struct {
 
     /* SNI */
     char server_name[256];
+    /* Client IP identities are checked against the leaf iPAddress SAN and
+     * are never copied into the SNI extension. Family values are 4 and 6. */
+    u8 peer_ip_address[16];
+    u8 peer_ip_address_family;
 
     /* レコード層 */
     tls_record_ctx_t* record;
@@ -367,6 +371,9 @@ void tls_handshake_clear(tls_handshake_ctx_t* ctx);
 
 /* サーバー名を設定 (SNI) */
 void tls_handshake_set_server_name(tls_handshake_ctx_t* ctx, const char* name);
+void tls_handshake_set_peer_ip_address(tls_handshake_ctx_t* ctx,
+                                      int address_family,
+                                      const u8* address);
 
 void tls_handshake_set_version_policy(tls_handshake_ctx_t* ctx,
                                       int allow_tls12, int allow_tls13);
