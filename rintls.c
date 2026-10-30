@@ -576,7 +576,7 @@ static void rintls_free_anchor_list(rintls_trust_anchor* anchor)
 void rintls_trust_store_retain(rintls_trust_store* store)
 {
     if (!store) return;
-#if defined(_WIN32)
+#if defined(_WIN32) && !RIN_FREESTANDING
     (void)InterlockedIncrement((volatile LONG*)&store->reference_count);
 #else
     (void)__atomic_add_fetch(&store->reference_count, 1u, __ATOMIC_RELAXED);
@@ -586,7 +586,7 @@ void rintls_trust_store_retain(rintls_trust_store* store)
 void rintls_trust_store_release(rintls_trust_store* store)
 {
     if (!store) return;
-#if defined(_WIN32)
+#if defined(_WIN32) && !RIN_FREESTANDING
     if (InterlockedDecrement((volatile LONG*)&store->reference_count) != 0)
         return;
 #else
@@ -1848,7 +1848,7 @@ static int socket_send(void* ctx, const u8* data, rin_size_t len)
         if (result > INT_MAX || result < INT_MIN) return RINTLS_ERR_IO;
         int ret = (int)result;
 #endif
-#if defined(_WIN32)
+#if defined(_WIN32) && !RIN_FREESTANDING
         if (ret == SOCKET_ERROR) {
             const int socket_error = WSAGetLastError();
             if (socket_error == WSAEWOULDBLOCK ||
@@ -1884,7 +1884,7 @@ static int socket_recv(void* ctx, u8* data, rin_size_t len)
         if (result > INT_MAX || result < INT_MIN) return RINTLS_ERR_IO;
         int ret = (int)result;
 #endif
-#if defined(_WIN32)
+#if defined(_WIN32) && !RIN_FREESTANDING
         if (ret == SOCKET_ERROR) {
             const int socket_error = WSAGetLastError();
             if (socket_error == WSAEWOULDBLOCK ||
