@@ -33,6 +33,16 @@ typedef struct {
     u8  ghash[16];      /* GHASH accumulator */
     u64 aad_len;        /* AAD length in bits */
     u64 ct_len;         /* Ciphertext length in bits */
+    u8 aad_partial[16]; /* Unprocessed AAD block */
+    u8 ct_partial[16];  /* Unprocessed ciphertext block */
+    u8 keystream[16];   /* Current CTR block across updates */
+    u8 aad_partial_len;
+    u8 ct_partial_len;
+    u8 keystream_offset;
+    u8 phase;           /* 0=unkeyed, 1=AAD, 2=data, 3=finished */
+    u8 mode;            /* 0=unset, 1=encrypt, 2=decrypt */
+    u8 error;
+    u8 initialized;
 } aes_gcm_ctx;
 
 /* ═══════════════════════════════════════
@@ -55,20 +65,23 @@ void aes_decrypt_block(const aes_ctx* ctx, const u8* in, u8* out);
 /* Initialize GCM context */
 int aes_gcm_init(aes_gcm_ctx* ctx, const u8* key, int key_size);
 
-/* Set IV/nonce (12 bytes recommended) */
-void aes_gcm_set_iv(aes_gcm_ctx* ctx, const u8* iv, rin_size_t iv_len);
+/* Set IV/nonce (12 bytes recommended). Returns 0 or -1. A successful call
+ * starts a fresh operation and clears a previous operation error. */
+int aes_gcm_set_iv(aes_gcm_ctx* ctx, const u8* iv, rin_size_t iv_len);
 
-/* Add additional authenticated data (AAD) */
-void aes_gcm_aad(aes_gcm_ctx* ctx, const u8* aad, rin_size_t aad_len);
+/* Add AAD before the first non-empty data update. All streaming calls return
+ * 0 on success and -1 on invalid state, pointer, or GCM length. An error is
+ * sticky until aes_gcm_set_iv() successfully starts a new operation. */
+int aes_gcm_aad(aes_gcm_ctx* ctx, const u8* aad, rin_size_t aad_len);
 
-/* Encrypt data in place (streaming API) */
-void aes_gcm_encrypt_inplace(aes_gcm_ctx* ctx, u8* data, rin_size_t len);
+/* Encrypt data in place (streaming API). Returns 0 or -1. */
+int aes_gcm_encrypt_inplace(aes_gcm_ctx* ctx, u8* data, rin_size_t len);
 
-/* Decrypt data in place (streaming API) */
-void aes_gcm_decrypt_inplace(aes_gcm_ctx* ctx, u8* data, rin_size_t len);
+/* Decrypt data in place (streaming API). Returns 0 or -1. */
+int aes_gcm_decrypt_inplace(aes_gcm_ctx* ctx, u8* data, rin_size_t len);
 
-/* Generate authentication tag */
-void aes_gcm_finish(aes_gcm_ctx* ctx, u8* tag);
+/* Generate authentication tag; returns 0 or -1 and zeros the tag on failure. */
+int aes_gcm_finish(aes_gcm_ctx* ctx, u8* tag);
 
 /* Verify authentication tag (returns 0 on success) */
 int aes_gcm_verify(aes_gcm_ctx* ctx, const u8* tag);

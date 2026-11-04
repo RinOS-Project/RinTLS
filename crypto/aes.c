@@ -366,8 +366,102 @@ static void gcm_inc_counter(u8* counter) {
     rintls_write_be32(counter + 12, c);
 }
 
+#define AES_GCM_PHASE_UNKEYED 0u
+#define AES_GCM_PHASE_AAD 1u
+#define AES_GCM_PHASE_DATA 2u
+#define AES_GCM_PHASE_FINISHED 3u
+#define AES_GCM_MODE_UNSET 0u
+#define AES_GCM_MODE_ENCRYPT 1u
+#define AES_GCM_MODE_DECRYPT 2u
+#define AES_GCM_MAX_CIPHERTEXT_BITS ((UINT64_C(1) << 39) - UINT64_C(256))
+
+static int aes_gcm_lengths_valid(rin_size_t aad_len, rin_size_t ct_len) {
+    u64 aad_bytes = (u64)aad_len;
+    u64 ct_bytes = (u64)ct_len;
+    return aad_bytes <= UINT64_MAX / 8u &&
+           ct_bytes <= AES_GCM_MAX_CIPHERTEXT_BITS / 8u;
+}
+
+static void ghash_block(aes_gcm_ctx* ctx, const u8 block[16]) {
+    for (int i = 0; i < 16; ++i) ctx->ghash[i] ^= block[i];
+    gcm_mult(ctx->ghash, ctx->h);
+}
+
+static void ghash_stream_update(aes_gcm_ctx* ctx, u8 partial[16],
+                                u8* partial_len, const u8* data,
+                                rin_size_t len) {
+    while (len != 0u) {
+        rin_size_t available = (rin_size_t)(16u - *partial_len);
+        rin_size_t take = len < available ? len : available;
+        rintls_memcpy(partial + *partial_len, data, take);
+        *partial_len = (u8)(*partial_len + take);
+        data += take;
+        len -= take;
+        if (*partial_len == 16u) {
+            ghash_block(ctx, partial);
+            rintls_memzero(partial, 16u);
+            *partial_len = 0u;
+        }
+    }
+}
+
+static void ghash_stream_finish(aes_gcm_ctx* ctx, u8 partial[16],
+                                u8* partial_len) {
+    if (*partial_len == 0u) return;
+    ghash_block(ctx, partial);
+    rintls_memzero(partial, 16u);
+    *partial_len = 0u;
+}
+
+static int aes_gcm_fail(aes_gcm_ctx* ctx) {
+    if (ctx != NULL) ctx->error = 1u;
+    return -1;
+}
+
+static int aes_gcm_crypt_inplace(aes_gcm_ctx* ctx, u8* data,
+                                 rin_size_t len, u8 mode) {
+    u64 bytes = (u64)len;
+    if (ctx == NULL || ctx->initialized == 0u || ctx->error != 0u ||
+        (ctx->phase != AES_GCM_PHASE_AAD &&
+         ctx->phase != AES_GCM_PHASE_DATA) ||
+        (len != 0u && data == NULL))
+        return aes_gcm_fail(ctx);
+    if (len == 0u) return 0;
+    if ((ctx->mode != AES_GCM_MODE_UNSET && ctx->mode != mode) ||
+        ctx->ct_len > AES_GCM_MAX_CIPHERTEXT_BITS ||
+        bytes > (AES_GCM_MAX_CIPHERTEXT_BITS - ctx->ct_len) / 8u)
+        return aes_gcm_fail(ctx);
+
+    if (ctx->phase == AES_GCM_PHASE_AAD) {
+        ghash_stream_finish(ctx, ctx->aad_partial,
+                            &ctx->aad_partial_len);
+        ctx->phase = AES_GCM_PHASE_DATA;
+    }
+    ctx->mode = mode;
+    ctx->ct_len += bytes * 8u;
+    for (rin_size_t index = 0; index < len; ++index) {
+        u8 ciphertext;
+        if (ctx->keystream_offset == 16u) {
+            aes_encrypt_block(&ctx->aes, ctx->counter, ctx->keystream);
+            gcm_inc_counter(ctx->counter);
+            ctx->keystream_offset = 0u;
+        }
+        if (mode == AES_GCM_MODE_ENCRYPT) {
+            data[index] ^= ctx->keystream[ctx->keystream_offset];
+            ciphertext = data[index];
+        } else {
+            ciphertext = data[index];
+            data[index] ^= ctx->keystream[ctx->keystream_offset];
+        }
+        ++ctx->keystream_offset;
+        ghash_stream_update(ctx, ctx->ct_partial, &ctx->ct_partial_len,
+                            &ciphertext, 1u);
+    }
+    return 0;
+}
+
 int aes_gcm_init(aes_gcm_ctx* ctx, const u8* key, int key_size) {
-    if (!ctx) return -1;
+    if (!ctx || !key) return -1;
     rintls_secure_zero(ctx, sizeof(*ctx));
 
     if (aes_init(&ctx->aes, key, key_size) != 0) {
@@ -378,14 +472,27 @@ int aes_gcm_init(aes_gcm_ctx* ctx, const u8* key, int key_size) {
     /* Compute hash subkey H = AES(K, 0^128) */
     u8 zero[16] = {0};
     aes_encrypt_block(&ctx->aes, zero, ctx->h);
+    ctx->phase = AES_GCM_PHASE_UNKEYED;
+    ctx->initialized = 1u;
 
     return 0;
 }
 
-void aes_gcm_set_iv(aes_gcm_ctx* ctx, const u8* iv, rin_size_t iv_len) {
+int aes_gcm_set_iv(aes_gcm_ctx* ctx, const u8* iv, rin_size_t iv_len) {
+    if (ctx == NULL || ctx->initialized == 0u || iv == NULL ||
+        iv_len == 0u || (u64)iv_len > UINT64_MAX / 8u)
+        return aes_gcm_fail(ctx);
     rintls_memset(ctx->ghash, 0, 16);
+    rintls_memset(ctx->aad_partial, 0, sizeof(ctx->aad_partial));
+    rintls_memset(ctx->ct_partial, 0, sizeof(ctx->ct_partial));
+    rintls_memset(ctx->keystream, 0, sizeof(ctx->keystream));
     ctx->aad_len = 0;
     ctx->ct_len = 0;
+    ctx->aad_partial_len = 0u;
+    ctx->ct_partial_len = 0u;
+    ctx->keystream_offset = 16u;
+    ctx->mode = AES_GCM_MODE_UNSET;
+    ctx->error = 0u;
 
     if (iv_len == 12) {
         /* Standard 96-bit IV */
@@ -402,132 +509,77 @@ void aes_gcm_set_iv(aes_gcm_ctx* ctx, const u8* iv, rin_size_t iv_len) {
         /* Process IV through GHASH */
         ghash_update(ctx, iv, iv_len);
 
-        /* Pad and add length */
-        rin_size_t padlen = (16 - (iv_len % 16)) % 16;
-        u8 pad[16] = {0};
-        if (padlen) ghash_update(ctx, pad, padlen);
-
+        /* ghash_update zero-pads its final partial IV block. */
         rintls_write_be64(len_block + 8, (u64)iv_len * 8);
         ghash_update(ctx, len_block, 16);
 
         rintls_memcpy(ctx->j0, ctx->ghash, 16);
         rintls_memset(ctx->ghash, 0, 16);
+        rintls_memzero(len_block, sizeof(len_block));
     }
 
     rintls_memcpy(ctx->counter, ctx->j0, 16);
     gcm_inc_counter(ctx->counter);
+    ctx->phase = AES_GCM_PHASE_AAD;
+    return 0;
 }
 
-void aes_gcm_aad(aes_gcm_ctx* ctx, const u8* aad, rin_size_t aad_len) {
-    /* NOTE: ghash_update handles partial blocks with implicit zero padding.
-     * Caller should pass all AAD in one call, or ensure 16-byte alignment
-     * between calls. */
-    ctx->aad_len += aad_len * 8;
-    ghash_update(ctx, aad, aad_len);
+int aes_gcm_aad(aes_gcm_ctx* ctx, const u8* aad, rin_size_t aad_len) {
+    u64 bytes = (u64)aad_len;
+    if (ctx == NULL || ctx->initialized == 0u || ctx->error != 0u ||
+        ctx->phase != AES_GCM_PHASE_AAD ||
+        (aad_len != 0u && aad == NULL))
+        return aes_gcm_fail(ctx);
+    if (bytes > (UINT64_MAX - ctx->aad_len) / 8u)
+        return aes_gcm_fail(ctx);
+    if (aad_len == 0u) return 0;
+    ctx->aad_len += bytes * 8u;
+    ghash_stream_update(ctx, ctx->aad_partial, &ctx->aad_partial_len,
+                        aad, aad_len);
+    return 0;
 }
 
-void aes_gcm_encrypt_inplace(aes_gcm_ctx* ctx, u8* data, rin_size_t len) {
-    u8 keystream[16];
-
-    ctx->ct_len += len * 8;
-
-    while (len >= 16) {
-        aes_encrypt_block(&ctx->aes, ctx->counter, keystream);
-        gcm_inc_counter(ctx->counter);
-
-        for (int i = 0; i < 16; i++) {
-            data[i] ^= keystream[i];
-        }
-
-        /* Update GHASH with ciphertext */
-        for (int i = 0; i < 16; i++) {
-            ctx->ghash[i] ^= data[i];
-        }
-        gcm_mult(ctx->ghash, ctx->h);
-
-        data += 16;
-        len -= 16;
-    }
-
-    if (len > 0) {
-        aes_encrypt_block(&ctx->aes, ctx->counter, keystream);
-        gcm_inc_counter(ctx->counter);
-
-        for (rin_size_t i = 0; i < len; i++) {
-            data[i] ^= keystream[i];
-        }
-
-        for (rin_size_t i = 0; i < len; i++) {
-            ctx->ghash[i] ^= data[i];
-        }
-        gcm_mult(ctx->ghash, ctx->h);
-    }
-    rintls_memzero(keystream, sizeof(keystream));
+int aes_gcm_encrypt_inplace(aes_gcm_ctx* ctx, u8* data, rin_size_t len) {
+    return aes_gcm_crypt_inplace(ctx, data, len, AES_GCM_MODE_ENCRYPT);
 }
 
-void aes_gcm_decrypt_inplace(aes_gcm_ctx* ctx, u8* data, rin_size_t len) {
-    u8 keystream[16];
-
-    ctx->ct_len += len * 8;
-
-    while (len >= 16) {
-        /* Update GHASH with ciphertext first */
-        for (int i = 0; i < 16; i++) {
-            ctx->ghash[i] ^= data[i];
-        }
-        gcm_mult(ctx->ghash, ctx->h);
-
-        aes_encrypt_block(&ctx->aes, ctx->counter, keystream);
-        gcm_inc_counter(ctx->counter);
-
-        for (int i = 0; i < 16; i++) {
-            data[i] ^= keystream[i];
-        }
-
-        data += 16;
-        len -= 16;
-    }
-
-    if (len > 0) {
-        for (rin_size_t i = 0; i < len; i++) {
-            ctx->ghash[i] ^= data[i];
-        }
-        gcm_mult(ctx->ghash, ctx->h);
-
-        aes_encrypt_block(&ctx->aes, ctx->counter, keystream);
-        gcm_inc_counter(ctx->counter);
-
-        for (rin_size_t i = 0; i < len; i++) {
-            data[i] ^= keystream[i];
-        }
-    }
-    rintls_memzero(keystream, sizeof(keystream));
+int aes_gcm_decrypt_inplace(aes_gcm_ctx* ctx, u8* data, rin_size_t len) {
+    return aes_gcm_crypt_inplace(ctx, data, len, AES_GCM_MODE_DECRYPT);
 }
 
-void aes_gcm_finish(aes_gcm_ctx* ctx, u8* tag) {
+int aes_gcm_finish(aes_gcm_ctx* ctx, u8* tag) {
+    if (ctx == NULL || tag == NULL || ctx->initialized == 0u ||
+        ctx->error != 0u ||
+        (ctx->phase != AES_GCM_PHASE_AAD &&
+         ctx->phase != AES_GCM_PHASE_DATA)) {
+        if (tag != NULL) rintls_memzero(tag, AES_GCM_TAG_SIZE);
+        return aes_gcm_fail(ctx);
+    }
+    ghash_stream_finish(ctx, ctx->aad_partial, &ctx->aad_partial_len);
+    ghash_stream_finish(ctx, ctx->ct_partial, &ctx->ct_partial_len);
     u8 len_block[16];
     u8 s[16];
-
-    /* NOTE: No additional padding needed - short blocks are processed with
-     * implicit zero padding in encrypt/decrypt_inplace functions */
-
-    /* Add lengths block */
     rintls_write_be64(len_block, ctx->aad_len);
     rintls_write_be64(len_block + 8, ctx->ct_len);
-    ghash_update(ctx, len_block, 16);
+    ghash_block(ctx, len_block);
 
-    /* Encrypt J0 and XOR with GHASH */
     aes_encrypt_block(&ctx->aes, ctx->j0, s);
-    for (int i = 0; i < 16; i++) {
-        tag[i] = ctx->ghash[i] ^ s[i];
-    }
+    for (int i = 0; i < 16; i++) tag[i] = ctx->ghash[i] ^ s[i];
+    ctx->phase = AES_GCM_PHASE_FINISHED;
+    rintls_memzero(ctx->aad_partial, sizeof(ctx->aad_partial));
+    rintls_memzero(ctx->ct_partial, sizeof(ctx->ct_partial));
+    rintls_memzero(ctx->keystream, sizeof(ctx->keystream));
     rintls_memzero(len_block, sizeof(len_block));
     rintls_memzero(s, sizeof(s));
+    return 0;
 }
 
 int aes_gcm_verify(aes_gcm_ctx* ctx, const u8* tag) {
-    u8 computed_tag[16];
-    aes_gcm_finish(ctx, computed_tag);
+    u8 computed_tag[AES_GCM_TAG_SIZE] = {0};
+    if (tag == NULL || aes_gcm_finish(ctx, computed_tag) != 0) {
+        rintls_memzero(computed_tag, sizeof(computed_tag));
+        return -1;
+    }
     int result = rintls_secure_compare(computed_tag, tag, 16);
     rintls_memzero(computed_tag, sizeof(computed_tag));
     return result;
@@ -544,25 +596,42 @@ int aes_gcm_encrypt_full(
 ) {
     aes_gcm_ctx ctx;
 
-    if (!key || !iv || iv_len == 0 || (aad_len != 0 && !aad) || !tag ||
+    if (!key || !iv || iv_len == 0 ||
+        (u64)iv_len > UINT64_MAX / 8u ||
+        !aes_gcm_lengths_valid(aad_len, pt_len) ||
+        (aad_len != 0 && !aad) || !tag ||
         (pt_len != 0 && (!plaintext || !ciphertext)))
         return -1;
 
     if (aes_gcm_init(&ctx, key, key_size) != 0) return -1;
 
-    aes_gcm_set_iv(&ctx, iv, iv_len);
+    if (aes_gcm_set_iv(&ctx, iv, iv_len) != 0) {
+        rintls_memzero(&ctx, sizeof(ctx));
+        return -1;
+    }
 
     if (aad && aad_len > 0) {
-        aes_gcm_aad(&ctx, aad, aad_len);
+        if (aes_gcm_aad(&ctx, aad, aad_len) != 0) {
+            rintls_memzero(&ctx, sizeof(ctx));
+            return -1;
+        }
     }
 
     if (pt_len != 0) {
         if (ciphertext != plaintext)
             rintls_memcpy(ciphertext, plaintext, pt_len);
-        aes_gcm_encrypt_inplace(&ctx, ciphertext, pt_len);
+        if (aes_gcm_encrypt_inplace(&ctx, ciphertext, pt_len) != 0) {
+            rintls_memzero(ciphertext, pt_len);
+            rintls_memzero(&ctx, sizeof(ctx));
+            return -1;
+        }
     }
 
-    aes_gcm_finish(&ctx, tag);
+    if (aes_gcm_finish(&ctx, tag) != 0) {
+        if (pt_len != 0u) rintls_memzero(ciphertext, pt_len);
+        rintls_memzero(&ctx, sizeof(ctx));
+        return -1;
+    }
 
     rintls_memzero(&ctx, sizeof(ctx));
     return 0;
@@ -578,21 +647,34 @@ int aes_gcm_decrypt_full(
 ) {
     aes_gcm_ctx ctx;
 
-    if (!key || !iv || iv_len == 0 || (aad_len != 0 && !aad) || !tag ||
+    if (!key || !iv || iv_len == 0 ||
+        (u64)iv_len > UINT64_MAX / 8u ||
+        !aes_gcm_lengths_valid(aad_len, ct_len) ||
+        (aad_len != 0 && !aad) || !tag ||
         (ct_len != 0 && (!ciphertext || !plaintext)))
         return -1;
 
     if (aes_gcm_init(&ctx, key, key_size) != 0) return -1;
 
-    aes_gcm_set_iv(&ctx, iv, iv_len);
+    if (aes_gcm_set_iv(&ctx, iv, iv_len) != 0) {
+        rintls_memzero(&ctx, sizeof(ctx));
+        return -1;
+    }
 
     if (aad && aad_len > 0) {
-        aes_gcm_aad(&ctx, aad, aad_len);
+        if (aes_gcm_aad(&ctx, aad, aad_len) != 0) {
+            rintls_memzero(&ctx, sizeof(ctx));
+            return -1;
+        }
     }
 
     if (ct_len != 0) {
         rintls_memcpy(plaintext, ciphertext, ct_len);
-        aes_gcm_decrypt_inplace(&ctx, plaintext, ct_len);
+        if (aes_gcm_decrypt_inplace(&ctx, plaintext, ct_len) != 0) {
+            rintls_memzero(plaintext, ct_len);
+            rintls_memzero(&ctx, sizeof(ctx));
+            return -1;
+        }
     }
 
     int result = aes_gcm_verify(&ctx, tag);
@@ -624,8 +706,10 @@ int aes_gcm_encrypt(
 ) {
     aes_gcm_ctx gcm;
     if (ct_len) *ct_len = 0;
-    if (!ctx || !nonce || nonce_len == 0 || !ct_len || !tag ||
+    if (!ctx || !nonce || nonce_len == 0 ||
+        (u64)nonce_len > UINT64_MAX / 8u || !ct_len || !tag ||
         tag_len != AES_GCM_TAG_SIZE || (aad_len != 0 && !aad) ||
+        !aes_gcm_lengths_valid(aad_len, pt_len) ||
         (pt_len != 0 && (!plaintext || !ciphertext)))
         return -1;
 
@@ -647,16 +731,12 @@ int aes_gcm_encrypt(
         /* Non-standard IV length - GHASH it */
         rintls_memset(gcm.j0, 0, 16);
         ghash_update(&gcm, nonce, nonce_len);
-        rin_size_t padlen = (16 - (nonce_len % 16)) % 16;
-        if (padlen) {
-            u8 pad[16] = {0};
-            ghash_update(&gcm, pad, padlen);
-        }
         u8 len_block[16] = {0};
         rintls_write_be64(len_block + 8, (u64)nonce_len * 8);
         ghash_update(&gcm, len_block, 16);
         rintls_memcpy(gcm.j0, gcm.ghash, 16);
         rintls_memset(gcm.ghash, 0, 16);
+        rintls_memzero(len_block, sizeof(len_block));
     }
 
     rintls_memcpy(gcm.counter, gcm.j0, 16);
@@ -665,14 +745,14 @@ int aes_gcm_encrypt(
     /* Process AAD */
     /* NOTE: ghash_update handles partial blocks with implicit zero padding */
     if (aad && aad_len > 0) {
-        gcm.aad_len = aad_len * 8;
+        gcm.aad_len = (u64)aad_len * 8u;
         ghash_update(&gcm, aad, aad_len);
     }
 
     /* Encrypt */
     if (pt_len != 0 && ciphertext != plaintext)
         rintls_memcpy(ciphertext, plaintext, pt_len);
-    gcm.ct_len = pt_len * 8;
+    gcm.ct_len = (u64)pt_len * 8u;
 
     u8 keystream[16];
     u8* data = ciphertext;
@@ -730,7 +810,9 @@ int aes_gcm_decrypt(
 ) {
     aes_gcm_ctx gcm;
     if (pt_len) *pt_len = 0;
-    if (!ctx || !nonce || nonce_len == 0 || !tag || tag_len != 16 ||
+    if (!ctx || !nonce || nonce_len == 0 ||
+        (u64)nonce_len > UINT64_MAX / 8u || !tag || tag_len != 16 ||
+        !aes_gcm_lengths_valid(aad_len, ct_len) ||
         !plaintext || !pt_len || (aad_len != 0 && !aad) ||
         (ct_len != 0 && !ciphertext)) {
         return -1;
@@ -753,16 +835,12 @@ int aes_gcm_decrypt(
     } else {
         rintls_memset(gcm.j0, 0, 16);
         ghash_update(&gcm, nonce, nonce_len);
-        rin_size_t padlen = (16 - (nonce_len % 16)) % 16;
-        if (padlen) {
-            u8 pad[16] = {0};
-            ghash_update(&gcm, pad, padlen);
-        }
         u8 len_block[16] = {0};
         rintls_write_be64(len_block + 8, (u64)nonce_len * 8);
         ghash_update(&gcm, len_block, 16);
         rintls_memcpy(gcm.j0, gcm.ghash, 16);
         rintls_memset(gcm.ghash, 0, 16);
+        rintls_memzero(len_block, sizeof(len_block));
     }
 
     rintls_memcpy(gcm.counter, gcm.j0, 16);
@@ -772,13 +850,13 @@ int aes_gcm_decrypt(
     /* NOTE: ghash_update handles partial blocks with implicit zero padding,
      * so no explicit padding is needed here */
     if (aad && aad_len > 0) {
-        gcm.aad_len = aad_len * 8;
+        gcm.aad_len = (u64)aad_len * 8u;
         ghash_update(&gcm, aad, aad_len);
     }
 
     /* Decrypt and compute GHASH */
     if (ct_len != 0) rintls_memcpy(plaintext, ciphertext, ct_len);
-    gcm.ct_len = ct_len * 8;
+    gcm.ct_len = (u64)ct_len * 8u;
 
     u8 keystream[16];
     u8* data = plaintext;
