@@ -93,10 +93,27 @@ void hmac_sha3_512_final(hmac_sha3_512_ctx* ctx, u8* mac);
  * ═══════════════════════════════════════ */
 
 /* HKDF-SHA256 */
+#define RINTLS_HKDF_SHA256_MAX_OUTPUT_SIZE (255u * HMAC_SHA256_SIZE)
+#define RINTLS_HKDF_SHA384_MAX_OUTPUT_SIZE (255u * HMAC_SHA384_SIZE)
+
+typedef enum {
+    RINTLS_HKDF_EXPAND_OK = 0,
+    RINTLS_HKDF_EXPAND_INVALID_ARGUMENT = -1,
+    RINTLS_HKDF_EXPAND_OUTPUT_TOO_LONG = -2
+} RinTlsHkdfExpandResult;
+
 void hkdf_sha256_extract(const u8* salt, rin_size_t salt_len,
                          const u8* ikm, rin_size_t ikm_len,
                          u8* prk);
 
+/* Checked forms leave output unchanged on validation failure. A zero-length
+ * request succeeds without inspecting any pointer. */
+int hkdf_sha256_expand_checked(const u8* prk,
+                               const u8* info, rin_size_t info_len,
+                               u8* okm, rin_size_t okm_len);
+
+/* Legacy void APIs retain their ABI. Invalid requests leave output unchanged;
+ * callers that need failure reporting must use the checked forms. */
 void hkdf_sha256_expand(const u8* prk,
                         const u8* info, rin_size_t info_len,
                         u8* okm, rin_size_t okm_len);
@@ -110,6 +127,10 @@ void hkdf_sha256(const u8* salt, rin_size_t salt_len,
 void hkdf_sha384_extract(const u8* salt, rin_size_t salt_len,
                          const u8* ikm, rin_size_t ikm_len,
                          u8* prk);
+
+int hkdf_sha384_expand_checked(const u8* prk,
+                               const u8* info, rin_size_t info_len,
+                               u8* okm, rin_size_t okm_len);
 
 void hkdf_sha384_expand(const u8* prk,
                         const u8* info, rin_size_t info_len,

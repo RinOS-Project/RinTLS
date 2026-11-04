@@ -398,22 +398,25 @@ void hkdf_sha256_extract(const u8* salt, rin_size_t salt_len,
  * T(N) = HMAC-Hash(PRK, T(N-1) | info | N)
  * OKM = T(1) | T(2) | ... | T(N)
  */
-/* Note: volatile prevents compiler optimizations that cause incorrect results */
-void hkdf_sha256_expand(const u8* prk,
-                        const u8* info, rin_size_t info_len,
-                        u8* okm, rin_size_t okm_len)
+int hkdf_sha256_expand_checked(const u8* prk,
+                               const u8* info, rin_size_t info_len,
+                               u8* okm, rin_size_t okm_len)
 {
     volatile u8 t[HMAC_SHA256_SIZE];
-    volatile u8 counter;
     rin_size_t t_len = 0;
     rin_size_t pos = 0;
     rin_size_t copy_len;
+    rin_size_t block = 1u;
 
-    /* N = ceil(L / HashLen) */
-    /* N <= 255 */
+    if (okm_len == 0u) return RINTLS_HKDF_EXPAND_OK;
+    if (okm_len > RINTLS_HKDF_SHA256_MAX_OUTPUT_SIZE)
+        return RINTLS_HKDF_EXPAND_OUTPUT_TOO_LONG;
+    if (!prk || !okm || (info_len != 0u && !info))
+        return RINTLS_HKDF_EXPAND_INVALID_ARGUMENT;
 
-    for (counter = 1; pos < okm_len; counter++) {
+    while (pos < okm_len) {
         hmac_sha256_ctx ctx;
+        u8 counter = (u8)block++;
         hmac_sha256_init(&ctx, prk, HMAC_SHA256_SIZE);
 
         /* T(N-1) を追加 (最初は空) */
@@ -431,8 +434,7 @@ void hkdf_sha256_expand(const u8* prk,
         }
 
         /* counter を追加 */
-        u8 cnt = counter;
-        hmac_sha256_update(&ctx, &cnt, 1);
+        hmac_sha256_update(&ctx, &counter, 1u);
 
         /* T(N) を計算 */
         u8 t_result[HMAC_SHA256_SIZE];
@@ -457,6 +459,14 @@ void hkdf_sha256_expand(const u8* prk,
 
     /* クリーンアップ */
     for (int i = 0; i < HMAC_SHA256_SIZE; i++) t[i] = 0;
+    return RINTLS_HKDF_EXPAND_OK;
+}
+
+void hkdf_sha256_expand(const u8* prk,
+                        const u8* info, rin_size_t info_len,
+                        u8* okm, rin_size_t okm_len)
+{
+    (void)hkdf_sha256_expand_checked(prk, info, info_len, okm, okm_len);
 }
 
 /*
@@ -494,18 +504,25 @@ void hkdf_sha384_extract(const u8* salt, rin_size_t salt_len,
     hmac_sha384(salt, salt_len, ikm, ikm_len, prk);
 }
 
-void hkdf_sha384_expand(const u8* prk,
-                        const u8* info, rin_size_t info_len,
-                        u8* okm, rin_size_t okm_len)
+int hkdf_sha384_expand_checked(const u8* prk,
+                               const u8* info, rin_size_t info_len,
+                               u8* okm, rin_size_t okm_len)
 {
     u8 t[HMAC_SHA384_SIZE];
-    u8 counter;
     rin_size_t t_len = 0;
     rin_size_t pos = 0;
     rin_size_t copy_len;
+    rin_size_t block = 1u;
 
-    for (counter = 1; pos < okm_len; counter++) {
+    if (okm_len == 0u) return RINTLS_HKDF_EXPAND_OK;
+    if (okm_len > RINTLS_HKDF_SHA384_MAX_OUTPUT_SIZE)
+        return RINTLS_HKDF_EXPAND_OUTPUT_TOO_LONG;
+    if (!prk || !okm || (info_len != 0u && !info))
+        return RINTLS_HKDF_EXPAND_INVALID_ARGUMENT;
+
+    while (pos < okm_len) {
         hmac_sha384_ctx ctx;
+        u8 counter = (u8)block++;
         hmac_sha384_init(&ctx, prk, HMAC_SHA384_SIZE);
 
         if (t_len > 0) {
@@ -531,6 +548,14 @@ void hkdf_sha384_expand(const u8* prk,
     }
 
     rintls_secure_zero(t, sizeof(t));
+    return RINTLS_HKDF_EXPAND_OK;
+}
+
+void hkdf_sha384_expand(const u8* prk,
+                        const u8* info, rin_size_t info_len,
+                        u8* okm, rin_size_t okm_len)
+{
+    (void)hkdf_sha384_expand_checked(prk, info, info_len, okm, okm_len);
 }
 
 void hkdf_sha384(const u8* salt, rin_size_t salt_len,
