@@ -27,6 +27,8 @@ typedef struct {
     u32 position;
     u8 domain;
     u8 squeezing;
+    /* Uses the alignment padding without changing the context size. */
+    u8 kmac_mode;
 } sha3_ctx;
 
 void sha3_256_init(sha3_ctx* ctx);
@@ -42,8 +44,8 @@ void sha3_512(const u8* data, rin_size_t len, u8* digest);
 void sha3_xof_init(sha3_ctx* ctx, u32 rate, u8 domain);
 int sha3_xof_squeeze(sha3_ctx* ctx, u8* output, rin_size_t output_len);
 
-/* SP 800-185 KMAC/KMACXOF.  The returned context is resettable and can be
- * updated incrementally; output length is selected by the final operation. */
+/* SP 800-185 KMAC/KMACXOF. The init and finalize xof flags must match; the
+ * returned context can be updated incrementally and finalized repeatedly. */
 int sha3_kmac_init(sha3_ctx* ctx, u32 rate, const u8* key, rin_size_t key_len,
                    const u8* customization, rin_size_t customization_len,
                    int xof);

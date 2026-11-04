@@ -5,6 +5,9 @@
 
 #include "sha3.h"
 
+#define SHA3_KMAC_MODE_FIXED 1u
+#define SHA3_KMAC_MODE_XOF 2u
+
 static const u64 KECCAK_ROUND_CONSTANTS[24] = {
     UINT64_C(0x0000000000000001), UINT64_C(0x0000000000008082),
     UINT64_C(0x800000000000808A), UINT64_C(0x8000000080008000),
@@ -375,7 +378,8 @@ int sha3_kmac_init(sha3_ctx* ctx, u32 rate, const u8* key,
 {
     if (ctx == NULL || (key == NULL && key_len != 0) ||
         (customization == NULL && customization_len != 0) ||
-        (rate != 168u && rate != 136u)) return 0;
+        (rate != 168u && rate != 136u) || (xof != 0 && xof != 1))
+        return 0;
 
     sha3_xof_init(ctx, rate, 0x04u);
     if (!sha3_cshake_prefix(ctx, rate, customization, customization_len) ||
@@ -383,7 +387,7 @@ int sha3_kmac_init(sha3_ctx* ctx, u32 rate, const u8* key,
         rintls_secure_zero(ctx, sizeof(*ctx));
         return 0;
     }
-    (void)xof;
+    ctx->kmac_mode = xof != 0 ? SHA3_KMAC_MODE_XOF : SHA3_KMAC_MODE_FIXED;
     ctx->squeezing = 0u;
     return 1;
 }
@@ -397,7 +401,13 @@ int sha3_kmac_finalize(const sha3_ctx* ctx, u8* output, rin_size_t output_len,
     u64 bit_length;
     int result;
 
-    if (ctx == NULL || (output == NULL && output_len != 0) ||
+    if (ctx == NULL || (xof != 0 && xof != 1) ||
+        ctx->kmac_mode !=
+            (xof != 0 ? SHA3_KMAC_MODE_XOF : SHA3_KMAC_MODE_FIXED) ||
+        ctx->domain != 0x04u ||
+        (ctx->rate != 168u && ctx->rate != 136u) ||
+        ctx->position > ctx->rate || ctx->squeezing != 0u ||
+        (output == NULL && output_len != 0) ||
         output_len > (rin_size_t)(UINT64_MAX / UINT64_C(8))) return 0;
 
     rintls_memcpy(&copy, ctx, sizeof(copy));
