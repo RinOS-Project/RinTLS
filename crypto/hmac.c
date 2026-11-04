@@ -88,6 +88,7 @@ void hmac_sha256_final(hmac_sha256_ctx* ctx, u8* mac)
 
     /* クリーンアップ */
     rintls_secure_zero(inner_hash, sizeof(inner_hash));
+    rintls_secure_zero(ctx, sizeof(*ctx));
 }
 
 void hmac_sha256(const u8* key, rin_size_t key_len,
@@ -147,9 +148,9 @@ void hmac_sha384_init(hmac_sha384_ctx* ctx, const u8* key, rin_size_t key_len)
     sha384_update(&ctx->outer, opad, SHA384_BLOCK_SIZE);
 
     /* セキュリティのためパディングをクリア */
-    rintls_memset(key_pad, 0, SHA384_BLOCK_SIZE);
-    rintls_memset(ipad, 0, SHA384_BLOCK_SIZE);
-    rintls_memset(opad, 0, SHA384_BLOCK_SIZE);
+    rintls_secure_zero(key_pad, sizeof(key_pad));
+    rintls_secure_zero(ipad, sizeof(ipad));
+    rintls_secure_zero(opad, sizeof(opad));
 }
 
 void hmac_sha384_update(hmac_sha384_ctx* ctx, const u8* data, rin_size_t len)
@@ -169,7 +170,8 @@ void hmac_sha384_final(hmac_sha384_ctx* ctx, u8* mac)
     sha384_final(&ctx->outer, mac);
 
     /* クリーンアップ */
-    rintls_memset(inner_hash, 0, SHA384_DIGEST_SIZE);
+    rintls_secure_zero(inner_hash, sizeof(inner_hash));
+    rintls_secure_zero(ctx, sizeof(*ctx));
 }
 
 void hmac_sha384(const u8* key, rin_size_t key_len,
@@ -232,6 +234,7 @@ void hmac_sha512_final(hmac_sha512_ctx* ctx, u8* mac)
     sha512_update(&ctx->outer, inner_hash, SHA512_DIGEST_SIZE);
     sha512_final(&ctx->outer, mac);
     rintls_secure_zero(inner_hash, sizeof(inner_hash));
+    rintls_secure_zero(ctx, sizeof(*ctx));
 }
 
 void hmac_sha512(const u8* key, rin_size_t key_len,
@@ -324,6 +327,7 @@ void hmac_sha3_256_final(hmac_sha3_256_ctx* ctx, u8* mac)
 {
     hmac_sha3_final_common(&ctx->inner, &ctx->outer, mac,
                            SHA3_256_DIGEST_SIZE);
+    rintls_secure_zero(ctx, sizeof(*ctx));
 }
 
 void hmac_sha3_384_init(hmac_sha3_384_ctx* ctx, const u8* key, rin_size_t key_len)
@@ -341,6 +345,7 @@ void hmac_sha3_384_final(hmac_sha3_384_ctx* ctx, u8* mac)
 {
     hmac_sha3_final_common(&ctx->inner, &ctx->outer, mac,
                            SHA3_384_DIGEST_SIZE);
+    rintls_secure_zero(ctx, sizeof(*ctx));
 }
 
 void hmac_sha3_512_init(hmac_sha3_512_ctx* ctx, const u8* key, rin_size_t key_len)
@@ -358,6 +363,7 @@ void hmac_sha3_512_final(hmac_sha3_512_ctx* ctx, u8* mac)
 {
     hmac_sha3_final_common(&ctx->inner, &ctx->outer, mac,
                            SHA3_512_DIGEST_SIZE);
+    rintls_secure_zero(ctx, sizeof(*ctx));
 }
 
 /* ═══════════════════════════════════════
@@ -521,10 +527,10 @@ void hkdf_sha384_expand(const u8* prk,
         rintls_memcpy(okm + pos, t, copy_len);
         pos += copy_len;
 
-        rintls_memset(&ctx, 0, sizeof(ctx));
+        rintls_secure_zero(&ctx, sizeof(ctx));
     }
 
-    rintls_memset(t, 0, HMAC_SHA384_SIZE);
+    rintls_secure_zero(t, sizeof(t));
 }
 
 void hkdf_sha384(const u8* salt, rin_size_t salt_len,
@@ -537,5 +543,5 @@ void hkdf_sha384(const u8* salt, rin_size_t salt_len,
     hkdf_sha384_extract(salt, salt_len, ikm, ikm_len, prk);
     hkdf_sha384_expand(prk, info, info_len, okm, okm_len);
 
-    rintls_memset(prk, 0, HMAC_SHA384_SIZE);
+    rintls_secure_zero(prk, sizeof(prk));
 }
