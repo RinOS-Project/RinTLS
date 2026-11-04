@@ -73,6 +73,17 @@ static u8 xtime(u8 x) {
 int aes_init(aes_ctx* ctx, const u8* key, int key_size) {
     int nk, i;
     u8 temp[4];
+    u8 key_copy[AES256_KEY_SIZE] = {0};
+
+    if (!ctx) return -1;
+    if (!key || (key_size != AES128_KEY_SIZE &&
+                 key_size != AES192_KEY_SIZE &&
+                 key_size != AES256_KEY_SIZE)) {
+        rintls_secure_zero(ctx, sizeof(*ctx));
+        return -1;
+    }
+    rintls_memcpy(key_copy, key, (rin_size_t)key_size);
+    rintls_secure_zero(ctx, sizeof(*ctx));
 
     if (key_size == 16) {
         ctx->nr = 10;
@@ -84,12 +95,13 @@ int aes_init(aes_ctx* ctx, const u8* key, int key_size) {
         ctx->nr = 14;
         nk = 8;
     } else {
+        rintls_secure_zero(key_copy, sizeof(key_copy));
         return -1;
     }
 
     /* Copy key to first nk words */
     for (i = 0; i < nk; i++) {
-        ctx->rk[i] = rintls_read_be32(key + i * 4);
+        ctx->rk[i] = rintls_read_be32(key_copy + i * 4);
     }
 
     /* Expand key */
@@ -115,6 +127,8 @@ int aes_init(aes_ctx* ctx, const u8* key, int key_size) {
         ctx->rk[i] = ctx->rk[i - nk] ^ tmp;
     }
 
+    rintls_secure_zero(temp, sizeof(temp));
+    rintls_secure_zero(key_copy, sizeof(key_copy));
     return 0;
 }
 
@@ -353,9 +367,11 @@ static void gcm_inc_counter(u8* counter) {
 }
 
 int aes_gcm_init(aes_gcm_ctx* ctx, const u8* key, int key_size) {
-    rintls_memset(ctx, 0, sizeof(aes_gcm_ctx));
+    if (!ctx) return -1;
+    rintls_secure_zero(ctx, sizeof(*ctx));
 
     if (aes_init(&ctx->aes, key, key_size) != 0) {
+        rintls_secure_zero(ctx, sizeof(*ctx));
         return -1;
     }
 
