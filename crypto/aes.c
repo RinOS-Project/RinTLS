@@ -538,6 +538,10 @@ int aes_gcm_encrypt_full(
 ) {
     aes_gcm_ctx ctx;
 
+    if (!key || !iv || iv_len == 0 || (aad_len != 0 && !aad) || !tag ||
+        (pt_len != 0 && (!plaintext || !ciphertext)))
+        return -1;
+
     if (aes_gcm_init(&ctx, key, key_size) != 0) return -1;
 
     aes_gcm_set_iv(&ctx, iv, iv_len);
@@ -546,8 +550,11 @@ int aes_gcm_encrypt_full(
         aes_gcm_aad(&ctx, aad, aad_len);
     }
 
-    rintls_memcpy(ciphertext, plaintext, pt_len);
-    aes_gcm_encrypt_inplace(&ctx, ciphertext, pt_len);
+    if (pt_len != 0) {
+        if (ciphertext != plaintext)
+            rintls_memcpy(ciphertext, plaintext, pt_len);
+        aes_gcm_encrypt_inplace(&ctx, ciphertext, pt_len);
+    }
 
     aes_gcm_finish(&ctx, tag);
 
@@ -565,6 +572,10 @@ int aes_gcm_decrypt_full(
 ) {
     aes_gcm_ctx ctx;
 
+    if (!key || !iv || iv_len == 0 || (aad_len != 0 && !aad) || !tag ||
+        (ct_len != 0 && (!ciphertext || !plaintext)))
+        return -1;
+
     if (aes_gcm_init(&ctx, key, key_size) != 0) return -1;
 
     aes_gcm_set_iv(&ctx, iv, iv_len);
@@ -573,14 +584,16 @@ int aes_gcm_decrypt_full(
         aes_gcm_aad(&ctx, aad, aad_len);
     }
 
-    rintls_memcpy(plaintext, ciphertext, ct_len);
-    aes_gcm_decrypt_inplace(&ctx, plaintext, ct_len);
+    if (ct_len != 0) {
+        rintls_memcpy(plaintext, ciphertext, ct_len);
+        aes_gcm_decrypt_inplace(&ctx, plaintext, ct_len);
+    }
 
     int result = aes_gcm_verify(&ctx, tag);
 
     if (result != 0) {
         /* Authentication failed - clear plaintext */
-        rintls_memzero(plaintext, ct_len);
+        if (ct_len != 0) rintls_memzero(plaintext, ct_len);
     }
 
     rintls_memzero(&ctx, sizeof(ctx));
@@ -604,7 +617,11 @@ int aes_gcm_encrypt(
     u8* tag, rin_size_t tag_len
 ) {
     aes_gcm_ctx gcm;
-    (void)tag_len;  /* We always use 16-byte tags */
+    if (ct_len) *ct_len = 0;
+    if (!ctx || !nonce || nonce_len == 0 || !ct_len || !tag ||
+        tag_len != AES_GCM_TAG_SIZE || (aad_len != 0 && !aad) ||
+        (pt_len != 0 && (!plaintext || !ciphertext)))
+        return -1;
 
     rintls_memset(&gcm, 0, sizeof(gcm));
     rintls_memcpy(&gcm.aes, ctx, sizeof(aes_ctx));
@@ -647,7 +664,8 @@ int aes_gcm_encrypt(
     }
 
     /* Encrypt */
-    rintls_memcpy(ciphertext, plaintext, pt_len);
+    if (pt_len != 0 && ciphertext != plaintext)
+        rintls_memcpy(ciphertext, plaintext, pt_len);
     gcm.ct_len = pt_len * 8;
 
     u8 keystream[16];
