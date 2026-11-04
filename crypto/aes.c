@@ -462,6 +462,7 @@ void aes_gcm_encrypt_inplace(aes_gcm_ctx* ctx, u8* data, rin_size_t len) {
         }
         gcm_mult(ctx->ghash, ctx->h);
     }
+    rintls_memzero(keystream, sizeof(keystream));
 }
 
 void aes_gcm_decrypt_inplace(aes_gcm_ctx* ctx, u8* data, rin_size_t len) {
@@ -500,6 +501,7 @@ void aes_gcm_decrypt_inplace(aes_gcm_ctx* ctx, u8* data, rin_size_t len) {
             data[i] ^= keystream[i];
         }
     }
+    rintls_memzero(keystream, sizeof(keystream));
 }
 
 void aes_gcm_finish(aes_gcm_ctx* ctx, u8* tag) {
@@ -519,12 +521,16 @@ void aes_gcm_finish(aes_gcm_ctx* ctx, u8* tag) {
     for (int i = 0; i < 16; i++) {
         tag[i] = ctx->ghash[i] ^ s[i];
     }
+    rintls_memzero(len_block, sizeof(len_block));
+    rintls_memzero(s, sizeof(s));
 }
 
 int aes_gcm_verify(aes_gcm_ctx* ctx, const u8* tag) {
     u8 computed_tag[16];
     aes_gcm_finish(ctx, computed_tag);
-    return rintls_secure_compare(computed_tag, tag, 16);
+    int result = rintls_secure_compare(computed_tag, tag, 16);
+    rintls_memzero(computed_tag, sizeof(computed_tag));
+    return result;
 }
 
 /* One-shot functions */
@@ -703,6 +709,9 @@ int aes_gcm_encrypt(
     aes_encrypt_block(&gcm.aes, gcm.j0, s);
     for (int i = 0; i < 16; i++) tag[i] = gcm.ghash[i] ^ s[i];
 
+    rintls_memzero(keystream, sizeof(keystream));
+    rintls_memzero(len_block, sizeof(len_block));
+    rintls_memzero(s, sizeof(s));
     rintls_memzero(&gcm, sizeof(gcm));
     return 0;
 }
