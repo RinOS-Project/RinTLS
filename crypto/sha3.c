@@ -124,7 +124,10 @@ static void sha3_init(sha3_ctx* ctx, u32 rate, u32 digest_size)
 
 void sha3_xof_init(sha3_ctx* ctx, u32 rate, u8 domain)
 {
+    if (ctx == NULL) return;
     rintls_memset(ctx, 0, sizeof(*ctx));
+    if (rate < 8u || rate >= (u32)sizeof(ctx->buffer) ||
+        (rate & 7u) != 0u) return;
     ctx->rate = rate;
     ctx->domain = domain;
 }
@@ -146,7 +149,9 @@ void sha3_512_init(sha3_ctx* ctx)
 
 void sha3_update(sha3_ctx* ctx, const u8* data, rin_size_t len)
 {
-    if (ctx == NULL || (data == NULL && len != 0)) return;
+    if (ctx == NULL || (data == NULL && len != 0) ||
+        ctx->rate < 8u || ctx->rate >= (u32)sizeof(ctx->buffer) ||
+        (ctx->rate & 7u) != 0u || ctx->position >= ctx->rate) return;
 
     while (len != 0) {
         rin_size_t available = (rin_size_t)(ctx->rate - ctx->position);
@@ -167,8 +172,11 @@ void sha3_final(sha3_ctx* ctx, u8* digest)
     u32 offset;
     u32 written = 0;
 
-    if (ctx == NULL || digest == NULL || ctx->rate == 0u ||
-        ctx->digest_size == 0u || ctx->position >= ctx->rate) return;
+    if (ctx == NULL || digest == NULL || ctx->rate < 8u ||
+        ctx->rate >= (u32)sizeof(ctx->buffer) || (ctx->rate & 7u) != 0u ||
+        ctx->digest_size == 0u ||
+        ctx->digest_size > (u32)sizeof(ctx->state) ||
+        ctx->position >= ctx->rate) return;
 
     ctx->buffer[ctx->position] = 0x06u;
     for (offset = ctx->position + 1u; offset < ctx->rate; offset++) {
@@ -322,10 +330,17 @@ static void sha3_xof_finalize_state(sha3_ctx* ctx)
 
 int sha3_xof_squeeze(sha3_ctx* ctx, u8* output, rin_size_t output_len)
 {
-    if (ctx == NULL || ctx->rate == 0u ||
+    if (ctx == NULL || ctx->rate < 8u ||
+        ctx->rate >= (u32)sizeof(ctx->buffer) || (ctx->rate & 7u) != 0u ||
+        ctx->position > ctx->rate ||
+        (ctx->position == ctx->rate && ctx->squeezing == 0u) ||
         (output == NULL && output_len != 0)) return 0;
 
     sha3_xof_finalize_state(ctx);
+    if (ctx->position == ctx->rate && output_len != 0) {
+        sha3_permute(ctx->state);
+        ctx->position = 0u;
+    }
     while (output_len != 0) {
         rin_size_t available = (rin_size_t)(ctx->rate - ctx->position);
         rin_size_t take = output_len < available ? output_len : available;
@@ -363,7 +378,10 @@ int sha3_kmac_init(sha3_ctx* ctx, u32 rate, const u8* key,
 
     sha3_xof_init(ctx, rate, 0x04u);
     if (!sha3_cshake_prefix(ctx, rate, customization, customization_len) ||
-        !sha3_append_bytepad(ctx, rate, key, key_len)) return 0;
+        !sha3_append_bytepad(ctx, rate, key, key_len)) {
+        rintls_secure_zero(ctx, sizeof(*ctx));
+        return 0;
+    }
     (void)xof;
     ctx->squeezing = 0u;
     return 1;
