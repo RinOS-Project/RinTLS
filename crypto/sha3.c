@@ -151,7 +151,8 @@ void sha3_update(sha3_ctx* ctx, const u8* data, rin_size_t len)
 {
     if (ctx == NULL || (data == NULL && len != 0) ||
         ctx->rate < 8u || ctx->rate >= (u32)sizeof(ctx->buffer) ||
-        (ctx->rate & 7u) != 0u || ctx->position >= ctx->rate) return;
+        (ctx->rate & 7u) != 0u || ctx->position >= ctx->rate ||
+        ctx->squeezing != 0u) return;
 
     while (len != 0) {
         rin_size_t available = (rin_size_t)(ctx->rate - ctx->position);
