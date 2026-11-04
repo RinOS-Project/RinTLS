@@ -5,6 +5,16 @@
 
 #include "aes.h"
 
+/* Freestanding RinOS uses a 32-bit rin_size_t, so every representable input
+ * length fits the 64-bit GCM length field. Hosted LP64 builds retain the
+ * explicit bound; avoid an always-false comparison on narrower size_t. */
+#if !defined(RIN_FREESTANDING) && SIZE_MAX > UINT64_MAX / 8u
+#define AES_GCM_LENGTH_EXCEEDS_BIT_LIMIT(length) \
+    ((u64)(length) > UINT64_MAX / 8u)
+#else
+#define AES_GCM_LENGTH_EXCEEDS_BIT_LIMIT(length) 0
+#endif
+
 /* Fixed-work GF(2^8) arithmetic avoids secret-indexed substitution tables. */
 static u8 aes_gf_mul(u8 left, u8 right)
 {
@@ -480,7 +490,7 @@ int aes_gcm_init(aes_gcm_ctx* ctx, const u8* key, int key_size) {
 
 int aes_gcm_set_iv(aes_gcm_ctx* ctx, const u8* iv, rin_size_t iv_len) {
     if (ctx == NULL || ctx->initialized == 0u || iv == NULL ||
-        iv_len == 0u || (u64)iv_len > UINT64_MAX / 8u)
+        iv_len == 0u || AES_GCM_LENGTH_EXCEEDS_BIT_LIMIT(iv_len))
         return aes_gcm_fail(ctx);
     rintls_memset(ctx->ghash, 0, 16);
     rintls_memset(ctx->aad_partial, 0, sizeof(ctx->aad_partial));
@@ -597,7 +607,7 @@ int aes_gcm_encrypt_full(
     aes_gcm_ctx ctx;
 
     if (!key || !iv || iv_len == 0 ||
-        (u64)iv_len > UINT64_MAX / 8u ||
+        AES_GCM_LENGTH_EXCEEDS_BIT_LIMIT(iv_len) ||
         !aes_gcm_lengths_valid(aad_len, pt_len) ||
         (aad_len != 0 && !aad) || !tag ||
         (pt_len != 0 && (!plaintext || !ciphertext)))
@@ -648,7 +658,7 @@ int aes_gcm_decrypt_full(
     aes_gcm_ctx ctx;
 
     if (!key || !iv || iv_len == 0 ||
-        (u64)iv_len > UINT64_MAX / 8u ||
+        AES_GCM_LENGTH_EXCEEDS_BIT_LIMIT(iv_len) ||
         !aes_gcm_lengths_valid(aad_len, ct_len) ||
         (aad_len != 0 && !aad) || !tag ||
         (ct_len != 0 && (!ciphertext || !plaintext)))
@@ -707,7 +717,7 @@ int aes_gcm_encrypt(
     aes_gcm_ctx gcm;
     if (ct_len) *ct_len = 0;
     if (!ctx || !nonce || nonce_len == 0 ||
-        (u64)nonce_len > UINT64_MAX / 8u || !ct_len || !tag ||
+        AES_GCM_LENGTH_EXCEEDS_BIT_LIMIT(nonce_len) || !ct_len || !tag ||
         tag_len != AES_GCM_TAG_SIZE || (aad_len != 0 && !aad) ||
         !aes_gcm_lengths_valid(aad_len, pt_len) ||
         (pt_len != 0 && (!plaintext || !ciphertext)))
@@ -811,7 +821,8 @@ int aes_gcm_decrypt(
     aes_gcm_ctx gcm;
     if (pt_len) *pt_len = 0;
     if (!ctx || !nonce || nonce_len == 0 ||
-        (u64)nonce_len > UINT64_MAX / 8u || !tag || tag_len != 16 ||
+        AES_GCM_LENGTH_EXCEEDS_BIT_LIMIT(nonce_len) ||
+        !tag || tag_len != 16 ||
         !aes_gcm_lengths_valid(aad_len, ct_len) ||
         !plaintext || !pt_len || (aad_len != 0 && !aad) ||
         (ct_len != 0 && !ciphertext)) {
