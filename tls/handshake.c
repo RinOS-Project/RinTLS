@@ -1599,7 +1599,7 @@ int tls_handshake_set_client_certificate(
     if (p != end || count == 0u)
         return TLS_HS_ERR_CERTIFICATE;
 
-    ctx->client_certificate_list = rintls_malloc(certificate_list_len);
+    ctx->client_certificate_list = (u8*)rintls_malloc(certificate_list_len);
     if (!ctx->client_certificate_list)
         return TLS_HS_ERR_IO;
     rintls_memcpy(ctx->client_certificate_list, bytes, certificate_list_len);
@@ -1674,7 +1674,7 @@ int tls_handshake_set_server_certificate(
         ctx->server_certificate_list)
         return TLS_HS_ERR_CERTIFICATE;
 
-    ctx->server_certificate_list = rintls_malloc(certificate_list_len);
+    ctx->server_certificate_list = (u8*)rintls_malloc(certificate_list_len);
     if (!ctx->server_certificate_list) return TLS_HS_ERR_IO;
     rintls_memcpy(ctx->server_certificate_list, bytes, certificate_list_len);
     ctx->server_certificate_list_len = certificate_list_len;
@@ -3364,7 +3364,7 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
      * bounded representation rather than assuming the wire list is large
      * enough for the expanded headers. */
     u32 peer_chain_capacity = TLS_MAX_PEER_CERTIFICATE_CHAIN_BYTES;
-    ctx->peer_certificate_chain = rintls_malloc(peer_chain_capacity);
+    ctx->peer_certificate_chain = (u8*)rintls_malloc(peer_chain_capacity);
     if (!ctx->peer_certificate_chain) return TLS_HS_ERR_IO;
     ctx->peer_certificate_chain_len = 4u;
     ctx->peer_certificate_chain_count = 0u;
@@ -3418,7 +3418,7 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
 
         if (cert_index == 0) {
             /* リーフ証明書のDERを保存 (API/デバッグ用) */
-            ctx->server_cert = rintls_malloc(cert_len);
+            ctx->server_cert = (u8*)rintls_malloc(cert_len);
             if (!ctx->server_cert) return TLS_HS_ERR_IO;
             rintls_memcpy(ctx->server_cert, cert_der, cert_len);
             ctx->server_cert_len = cert_len;
@@ -3437,7 +3437,7 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
             break;
         }
         if (cert_index == 1) {
-            ctx->server_issuer_cert = rintls_malloc(cert_len);
+            ctx->server_issuer_cert = (u8*)rintls_malloc(cert_len);
             if (!ctx->server_issuer_cert) return TLS_HS_ERR_IO;
             rintls_memcpy(ctx->server_issuer_cert, cert_der, cert_len);
             ctx->server_issuer_cert_len = cert_len;
