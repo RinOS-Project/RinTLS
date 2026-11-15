@@ -173,7 +173,10 @@ typedef enum {
 #define TLS_MAX_PEER_SIGNATURE_SCHEMES 64u
 
 typedef int (*tls_trust_anchor_verify_func)(void* opaque,
-                                            const x509_cert_t* chain_top);
+                                            const x509_cert_t* chain_top,
+                                            const u8* peer_chain,
+                                            rin_size_t peer_chain_len,
+                                            u32 peer_chain_count);
 
 typedef int (*tls_client_certificate_sign_func)(
     void* opaque, u16 signature_scheme, const u8* message,

@@ -130,6 +130,13 @@ typedef struct {
     const u8* san_names_data;
     rin_size_t san_names_len;
 
+    /* Critical NameConstraints extnValue retained from the DER certificate.
+     * Mozilla also imposes fingerprint-bound root constraints outside the
+     * certificate; the trust-store policy supplies those through the same
+     * bounded validator. */
+    const u8* name_constraints_data;
+    rin_size_t name_constraints_len;
+
     /* Revocation endpoints are borrowed from raw_data through parse-time
      * bounded copies.  Empty strings mean the corresponding extension did
      * not advertise a URI.  RinTLS does not treat these as proof of status;
@@ -246,6 +253,14 @@ int x509_check_hostname(const x509_cert_t* cert, const char* hostname);
  * address against an iPAddress GeneralName in subjectAltName. */
 int x509_check_ip_address(const x509_cert_t* cert, int address_family,
                           const u8* address, rin_size_t address_length);
+
+/* Validate a DER NameConstraints value and apply it to every certificate in
+ * the supplied subordinate prefix. Only DNS and IP subtrees are supported;
+ * unsupported/malformed subtree forms fail closed. */
+int x509_validate_name_constraints(const u8* der, rin_size_t der_len);
+int x509_check_name_constraints(const u8* der, rin_size_t der_len,
+                                const x509_cert_t* subordinate_certs,
+                                int subordinate_count);
 
 /* Match the identity of a cross-signed CA certificate against a configured
  * trust anchor.  Both the DER-encoded subject and the complete public key

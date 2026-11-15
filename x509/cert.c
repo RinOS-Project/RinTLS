@@ -50,6 +50,7 @@ static const u8 OID_CN[] = {0x55, 0x04, 0x03};  /* commonName */
 static const u8 OID_BASIC_CONSTRAINTS[] = {0x55, 0x1D, 0x13};
 static const u8 OID_KEY_USAGE[] = {0x55, 0x1D, 0x0F};
 static const u8 OID_SUBJECT_ALT_NAME[] = {0x55, 0x1D, 0x11};
+static const u8 OID_NAME_CONSTRAINTS[] = {0x55, 0x1D, 0x1E};
 static const u8 OID_CRL_DISTRIBUTION_POINTS[] = {0x55, 0x1D, 0x1F};
 static const u8 OID_AUTHORITY_INFO_ACCESS[] = {
     0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x01
@@ -513,12 +514,16 @@ static int parse_extensions(x509_cert_t* cert, const u8** p, const u8* end)
             continue;
         }
 
+        int is_critical = 0;
         int is_basic_constraints = (len == sizeof(OID_BASIC_CONSTRAINTS) &&
                                     rintls_memcmp(*p, OID_BASIC_CONSTRAINTS, len) == 0);
         int is_key_usage = (len == sizeof(OID_KEY_USAGE) &&
                             rintls_memcmp(*p, OID_KEY_USAGE, len) == 0);
         int is_san = (len == sizeof(OID_SUBJECT_ALT_NAME) &&
                       rintls_memcmp(*p, OID_SUBJECT_ALT_NAME, len) == 0);
+        int is_name_constraints =
+            (len == sizeof(OID_NAME_CONSTRAINTS) &&
+             rintls_memcmp(*p, OID_NAME_CONSTRAINTS, len) == 0);
         int is_crl_distribution_points =
             (len == sizeof(OID_CRL_DISTRIBUTION_POINTS) &&
              rintls_memcmp(*p, OID_CRL_DISTRIBUTION_POINTS, len) == 0);
@@ -534,6 +539,12 @@ static int parse_extensions(x509_cert_t* cert, const u8** p, const u8* end)
                 continue;
             }
             if (tag == ASN1_BOOLEAN) {
+                if (len != 1u || (**p != 0u && **p != 0xFFu)) {
+                    if (is_name_constraints) return -1;
+                    *p = single_ext_end;
+                    continue;
+                }
+                is_critical = (**p == 0xFFu);
                 *p += len;
                 /* extnValue */
                 if (asn1_read_tag(p, single_ext_end, &tag, &len) < 0) {
@@ -542,9 +553,12 @@ static int parse_extensions(x509_cert_t* cert, const u8** p, const u8* end)
                 }
             }
             if (tag != ASN1_OCTET_STRING) {
+                if (is_name_constraints) return -1;
                 *p = single_ext_end;
                 continue;
             }
+        } else if (is_name_constraints) {
+            return -1;
         }
 
         const u8* value_data = *p;
@@ -589,6 +603,13 @@ static int parse_extensions(x509_cert_t* cert, const u8** p, const u8* end)
                     san_p += len;
                 }
             }
+        } else if (is_name_constraints) {
+            if (!is_critical || cert->name_constraints_data != NULL ||
+                x509_validate_name_constraints(value_data, value_len) !=
+                    X509_OK)
+                return -1;
+            cert->name_constraints_data = value_data;
+            cert->name_constraints_len = value_len;
         } else if (is_authority_info_access) {
             parse_ocsp_access_descriptions(cert, value_data, value_len);
         } else if (is_crl_distribution_points) {
@@ -1578,6 +1599,296 @@ int x509_check_ip_address(const x509_cert_t* cert, int address_family,
         san_p += length;
     }
     return X509_ERR_NAME;
+}
+
+static int x509_name_constraint_dns_valid(const u8* name, rin_size_t length)
+{
+    rin_size_t offset = 0u;
+    rin_size_t label_start;
+    if (!name || length == 0u || length > 254u) return 0;
+    if (name[0] == '.') offset = 1u;
+    if (offset == length || name[length - 1u] == '.') return 0;
+    label_start = offset;
+    for (; offset <= length; ++offset) {
+        if (offset != length && name[offset] != '.') {
+            u8 character = name[offset];
+            if (!((character >= 'A' && character <= 'Z') ||
+                  (character >= 'a' && character <= 'z') ||
+                  (character >= '0' && character <= '9') ||
+                  character == '-'))
+                return 0;
+            continue;
+        }
+        if (offset == label_start || offset - label_start > 63u ||
+            name[label_start] == '-' || name[offset - 1u] == '-')
+            return 0;
+        label_start = offset + 1u;
+    }
+    return 1;
+}
+
+static int x509_dns_candidate_valid(const u8* name, rin_size_t length)
+{
+    if (length > 2u && name[0] == '*' && name[1] == '.')
+        return x509_name_constraint_dns_valid(name + 2u, length - 2u);
+    return x509_name_constraint_dns_valid(name, length);
+}
+
+static int x509_name_constraint_ip_mask_valid(const u8* mask,
+                                               rin_size_t length)
+{
+    int saw_zero = 0;
+    if (!mask || (length != 4u && length != 16u)) return 0;
+    for (rin_size_t index = 0u; index < length; ++index) {
+        for (u8 bit = 0x80u; bit != 0u; bit >>= 1) {
+            if ((mask[index] & bit) == 0u) saw_zero = 1;
+            else if (saw_zero) return 0;
+        }
+    }
+    return 1;
+}
+
+int x509_validate_name_constraints(const u8* der, rin_size_t der_len)
+{
+    const u8* p = der;
+    const u8* end;
+    const u8* sequence_end;
+    u8 tag;
+    rin_size_t length;
+    int saw_permitted = 0;
+    int saw_excluded = 0;
+    int saw_subtree = 0;
+    u8 previous_tag = 0u;
+
+    if (!der || der_len == 0u ||
+        asn1_read_tag(&p, der + der_len, &tag, &length) < 0 ||
+        tag != ASN1_SEQUENCE || p + length != der + der_len)
+        return X509_ERR_PARSE;
+    end = p + length;
+    sequence_end = end;
+    while (p < sequence_end) {
+        const u8* subtree_list_end;
+        int permitted;
+        if (asn1_read_tag(&p, sequence_end, &tag, &length) < 0 ||
+            (tag != 0xA0u && tag != 0xA1u) || tag <= previous_tag)
+            return X509_ERR_PARSE;
+        previous_tag = tag;
+        permitted = tag == 0xA0u;
+        if ((permitted && saw_permitted) || (!permitted && saw_excluded))
+            return X509_ERR_PARSE;
+        if (permitted) saw_permitted = 1;
+        else saw_excluded = 1;
+        subtree_list_end = p + length;
+        if (p == subtree_list_end) return X509_ERR_PARSE;
+        while (p < subtree_list_end) {
+            const u8* subtree_end;
+            const u8* base;
+            rin_size_t base_length;
+            u8 base_tag;
+            if (asn1_read_tag(&p, subtree_list_end, &tag, &length) < 0 ||
+                tag != ASN1_SEQUENCE)
+                return X509_ERR_PARSE;
+            subtree_end = p + length;
+            if (asn1_read_tag(&p, subtree_end, &base_tag, &base_length) < 0)
+                return X509_ERR_PARSE;
+            base = p;
+            if ((base_tag == 0x82u &&
+                 !x509_name_constraint_dns_valid(base, base_length)) ||
+                (base_tag == 0x87u &&
+                 (base_length != 8u && base_length != 32u)) ||
+                (base_tag != 0x82u && base_tag != 0x87u))
+                return X509_ERR_UNSUPPORTED;
+            if (base_tag == 0x87u &&
+                !x509_name_constraint_ip_mask_valid(
+                    base + base_length / 2u, base_length / 2u))
+                return X509_ERR_PARSE;
+            p += base_length;
+            if (p < subtree_end) {
+                u8 bound_tag;
+                rin_size_t bound_length;
+                if (asn1_read_tag(&p, subtree_end, &bound_tag,
+                                  &bound_length) < 0 ||
+                    bound_tag != 0x80u || bound_length != 1u || *p != 0u)
+                    return X509_ERR_UNSUPPORTED;
+                p += bound_length;
+            }
+            if (p != subtree_end) return X509_ERR_UNSUPPORTED;
+            saw_subtree = 1;
+        }
+        if (p != subtree_list_end) return X509_ERR_PARSE;
+    }
+    return p == end && saw_subtree && (saw_permitted || saw_excluded)
+               ? X509_OK
+               : X509_ERR_PARSE;
+}
+
+static char x509_constraint_lower(u8 value)
+{
+    return value >= 'A' && value <= 'Z'
+               ? (char)(value + ('a' - 'A'))
+               : (char)value;
+}
+
+static int x509_dns_subtree_matches(const u8* candidate,
+                                    rin_size_t candidate_len,
+                                    const u8* subtree,
+                                    rin_size_t subtree_len)
+{
+    rin_size_t start = subtree[0] == '.' ? 1u : 0u;
+    rin_size_t suffix_len = subtree_len - start;
+    int wildcard = candidate_len > 2u && candidate[0] == '*' &&
+                   candidate[1] == '.';
+    const u8* name = candidate;
+    rin_size_t name_len = candidate_len;
+    if (wildcard) {
+        name += 2u;
+        name_len -= 2u;
+    }
+    if (name_len < suffix_len) return 0;
+    for (rin_size_t index = 0u; index < suffix_len; ++index) {
+        if (x509_constraint_lower(name[name_len - suffix_len + index]) !=
+            x509_constraint_lower(subtree[start + index]))
+            return 0;
+    }
+    if (name_len == suffix_len) return subtree[0] != '.';
+    if (name[name_len - suffix_len - 1u] != '.') return 0;
+    /* A leading-dot subtree excludes its apex; a wildcard represents one
+     * label below its suffix and is therefore a strict subdomain. */
+    return 1;
+}
+
+static int x509_ip_subtree_matches(const u8* address, rin_size_t address_len,
+                                   const u8* subtree,
+                                   rin_size_t subtree_len)
+{
+    rin_size_t width = subtree_len / 2u;
+    if (address_len != width) return 0;
+    for (rin_size_t index = 0u; index < width; ++index) {
+        if ((address[index] & subtree[width + index]) !=
+            (subtree[index] & subtree[width + index]))
+            return 0;
+    }
+    return 1;
+}
+
+static int x509_name_matches_constraints(const u8* der, rin_size_t der_len,
+                                         u8 name_tag, const u8* name,
+                                         rin_size_t name_len)
+{
+    const u8* p = der;
+    const u8* end = der + der_len;
+    const u8* sequence_end;
+    u8 tag;
+    rin_size_t length;
+    int saw_permitted_type = 0;
+    int matched_permitted = 0;
+    if (asn1_read_tag(&p, end, &tag, &length) < 0 || tag != ASN1_SEQUENCE)
+        return 0;
+    sequence_end = p + length;
+    while (p < sequence_end) {
+        const u8* list_end;
+        int permitted;
+        if (asn1_read_tag(&p, sequence_end, &tag, &length) < 0) return 0;
+        permitted = tag == 0xA0u;
+        list_end = p + length;
+        while (p < list_end) {
+            const u8* subtree_end;
+            const u8* base;
+            rin_size_t base_len;
+            u8 base_tag;
+            if (asn1_read_tag(&p, list_end, &tag, &length) < 0 ||
+                tag != ASN1_SEQUENCE)
+                return 0;
+            subtree_end = p + length;
+            if (asn1_read_tag(&p, subtree_end, &base_tag, &base_len) < 0)
+                return 0;
+            base = p;
+            if (permitted && base_tag == name_tag) saw_permitted_type = 1;
+            if (base_tag == name_tag) {
+                int matches = name_tag == 0x82u
+                                  ? x509_dns_subtree_matches(
+                                        name, name_len, base, base_len)
+                                  : x509_ip_subtree_matches(
+                                        name, name_len, base, base_len);
+                if (!permitted && matches) return 0;
+                if (permitted && matches) matched_permitted = 1;
+            }
+            p += base_len;
+            while (p < subtree_end) {
+                if (asn1_read_tag(&p, subtree_end, &tag, &length) < 0)
+                    return 0;
+                p += length;
+            }
+            if (p != subtree_end) return 0;
+        }
+        if (p != list_end) return 0;
+    }
+    return !saw_permitted_type || matched_permitted;
+}
+
+static int x509_check_one_cert_name_constraints(
+    const u8* constraints, rin_size_t constraints_len,
+    const x509_cert_t* certificate, int check_leaf_common_name)
+{
+    int saw_dns_san = 0;
+    if (!certificate) return 0;
+    if (certificate->san_names_data && certificate->san_names_len != 0u) {
+        const u8* p = certificate->san_names_data;
+        const u8* end = p + certificate->san_names_len;
+        while (p < end) {
+            u8 tag;
+            rin_size_t length;
+            if (asn1_read_tag(&p, end, &tag, &length) < 0) return 0;
+            if (tag == 0x82u) {
+                saw_dns_san = 1;
+                if (length == 0u || length > X509_MAX_HOSTNAME_BYTES - 1u ||
+                    !x509_dns_candidate_valid(p, length) ||
+                    !x509_name_matches_constraints(constraints,
+                                                   constraints_len, tag,
+                                                   p, length))
+                    return 0;
+            } else if (tag == 0x87u) {
+                if ((length != 4u && length != 16u) ||
+                    !x509_name_matches_constraints(constraints,
+                                                   constraints_len, tag,
+                                                   p, length))
+                    return 0;
+            }
+            p += length;
+        }
+        if (p != end) return 0;
+    }
+    if (check_leaf_common_name && !saw_dns_san &&
+        certificate->subject_cn[0] != '\0') {
+        rin_size_t cn_len = 0u;
+        while (cn_len < sizeof(certificate->subject_cn) &&
+               certificate->subject_cn[cn_len] != '\0')
+            ++cn_len;
+        if (cn_len == sizeof(certificate->subject_cn) ||
+            !x509_dns_candidate_valid(
+                (const u8*)certificate->subject_cn, cn_len) ||
+            !x509_name_matches_constraints(
+                constraints, constraints_len, 0x82u,
+                (const u8*)certificate->subject_cn, cn_len))
+            return 0;
+    }
+    return 1;
+}
+
+int x509_check_name_constraints(const u8* der, rin_size_t der_len,
+                                const x509_cert_t* subordinate_certs,
+                                int subordinate_count)
+{
+    if (x509_validate_name_constraints(der, der_len) != X509_OK ||
+        (!subordinate_certs && subordinate_count != 0) ||
+        subordinate_count < 0)
+        return X509_ERR_PARSE;
+    for (int index = 0; index < subordinate_count; ++index) {
+        if (!x509_check_one_cert_name_constraints(
+                der, der_len, &subordinate_certs[index], index == 0))
+            return X509_ERR_NAME;
+    }
+    return X509_OK;
 }
 
 int x509_trust_identity_matches(const x509_cert_t* candidate,

@@ -7,6 +7,7 @@
 #include "tls/record.h"
 #include "tls/handshake.h"
 #include "x509/cert.h"
+#include "crypto/sha256.h"
 #include "platform/rin_platform.h"
 #include <rin/net/ipv6_text.h>
 #include <limits.h>
@@ -22,6 +23,12 @@ typedef struct rintls_trust_anchor {
     x509_cert_t certificate;
     u8* der;
     rin_size_t der_len;
+    u8 trust_flags;
+    u8 policy_present;
+    u64 server_distrust_after;
+    u64 email_distrust_after;
+    u8* name_constraints_der;
+    rin_size_t name_constraints_len;
     struct rintls_trust_anchor* next;
 } rintls_trust_anchor;
 
@@ -29,6 +36,8 @@ struct rintls_trust_store {
     rintls_trust_anchor* trust_anchors;
     u32 trust_anchor_count;
     u32 reference_count;
+    u64 policy_reviewed_at;
+    u64 policy_expires_at;
 };
 
 struct rintls_ctx {
@@ -71,57 +80,186 @@ struct rintls_ctx {
 
 #define RINTLS_MAX_TRUST_ANCHORS 256u
 #define RINTLS_MAX_TRUST_BUNDLE_BYTES (4u * 1024u * 1024u)
+#define RINTLS_TRUST_POLICY_HEADER_BYTES 24u
+#define RINTLS_TRUST_POLICY_RECORD_BYTES 52u
+#define RINTLS_TRUST_POLICY_WEBSITES 0x01u
+#define RINTLS_TRUST_POLICY_EMAIL 0x02u
+
+static u64 rintls_read_le64(const u8* bytes)
+{
+    u64 value = 0u;
+    for (u32 index = 0u; index < 8u; ++index)
+        value |= (u64)bytes[index] << (index * 8u);
+    return value;
+}
+
+static u16 rintls_read_le16(const u8* bytes)
+{
+    return (u16)bytes[0] | ((u16)bytes[1] << 8);
+}
+
+static u32 rintls_read_le32(const u8* bytes);
 
 static int rintls_verify_against_anchors(rintls_trust_anchor* anchor,
                                          const x509_cert_t* chain_top,
-                                         u64 trusted_unix_time)
+                                         const x509_cert_t* chain,
+                                         u32 chain_count,
+                                         u64 trusted_unix_time,
+                                         u64 policy_reviewed_at,
+                                         u64 policy_expires_at)
 {
+    if (!chain || chain_count == 0u || trusted_unix_time == 0u ||
+        policy_reviewed_at == 0u || trusted_unix_time < policy_reviewed_at ||
+        policy_expires_at <= policy_reviewed_at ||
+        trusted_unix_time >= policy_expires_at)
+        return 0;
     for (; anchor; anchor = anchor->next) {
         x509_cert_t* trusted = &anchor->certificate;
         int validity = trusted_unix_time != 0u
                            ? x509_check_validity_at(trusted,
                                                     trusted_unix_time)
                            : x509_check_validity(trusted);
-        if (!trusted->is_ca || validity != X509_OK) continue;
+        if (!anchor->policy_present ||
+            !(anchor->trust_flags & RINTLS_TRUST_POLICY_WEBSITES) ||
+            !trusted->is_ca || validity != X509_OK) {
+            continue;
+        }
 
+        int anchor_matches = 0;
         if (chain_top->raw_len == trusted->raw_len &&
             chain_top->raw_len != 0 &&
             rintls_memcmp(chain_top->raw_data, trusted->raw_data,
                           chain_top->raw_len) == 0) {
-            return 1;
+            anchor_matches = 1;
         }
 
-        if (x509_trust_identity_matches(chain_top, trusted)) {
-            return 1;
-        }
+        if (!anchor_matches && x509_trust_identity_matches(chain_top, trusted))
+            anchor_matches = 1;
 
-        if (chain_top->issuer_name && trusted->subject_name &&
+        if (!anchor_matches && chain_top->issuer_name && trusted->subject_name &&
             chain_top->issuer_name_len != 0 &&
             chain_top->issuer_name_len == trusted->subject_name_len &&
             rintls_memcmp(chain_top->issuer_name, trusted->subject_name,
                           chain_top->issuer_name_len) == 0 &&
             x509_verify_signature(chain_top, trusted) == X509_OK) {
-            return 1;
+            anchor_matches = 1;
         }
+        if (!anchor_matches) {
+            continue;
+        }
+
+        if (anchor->server_distrust_after != 0u) {
+            u64 leaf_not_before;
+            if (!x509_time_to_unix(&chain[0].not_before, &leaf_not_before) ||
+                leaf_not_before > anchor->server_distrust_after) {
+                continue;
+            }
+        }
+        {
+            int constraints_ok = 1;
+            for (u32 index = 1u; index < chain_count; ++index) {
+                if (chain[index].name_constraints_data &&
+                    x509_check_name_constraints(
+                        chain[index].name_constraints_data,
+                        chain[index].name_constraints_len,
+                        chain, (int)index) != X509_OK) {
+                    constraints_ok = 0;
+                    break;
+                }
+            }
+            if (!constraints_ok) {
+                continue;
+            }
+            if (anchor->name_constraints_len != 0u &&
+                x509_check_name_constraints(
+                    anchor->name_constraints_der,
+                    anchor->name_constraints_len, chain,
+                        (int)chain_count) != X509_OK) {
+                continue;
+            }
+        }
+        return 1;
     }
     return 0;
 }
 
-static int rintls_verify_chain_top(void* opaque, const x509_cert_t* chain_top)
+static int rintls_decode_peer_chain(const u8* encoded, rin_size_t encoded_len,
+                                    u32 expected_count,
+                                    x509_cert_t** certificates_out)
+{
+    rin_size_t offset = 4u;
+    u32 count;
+    x509_cert_t* certificates;
+    if (certificates_out) *certificates_out = RIN_NULL;
+    if (!encoded || encoded_len < 4u || !certificates_out ||
+        expected_count == 0u || expected_count > RINTLS_MAX_CERT_CHAIN)
+        return 0;
+    count = rintls_read_le32(encoded);
+    if (count != expected_count) return 0;
+    certificates = (x509_cert_t*)rintls_malloc(
+        (rin_size_t)count * sizeof(*certificates));
+    if (!certificates) return 0;
+    rintls_memset(certificates, 0, (rin_size_t)count * sizeof(*certificates));
+    for (u32 index = 0u; index < count; ++index) {
+        u32 der_len;
+        if (offset > encoded_len || encoded_len - offset < 4u) goto invalid;
+        der_len = rintls_read_le32(encoded + offset);
+        offset += 4u;
+        if (der_len == 0u || der_len > encoded_len - offset ||
+            x509_parse_cert(&certificates[index], encoded + offset,
+                            der_len) != X509_OK)
+            goto invalid;
+        offset += der_len;
+    }
+    if (offset != encoded_len) goto invalid;
+    *certificates_out = certificates;
+    return 1;
+
+invalid:
+    for (u32 index = 0u; index < count; ++index)
+        x509_cert_clear(&certificates[index]);
+    rintls_secure_zero(certificates,
+                       (rin_size_t)count * sizeof(*certificates));
+    rintls_mem_free(certificates);
+    return 0;
+}
+
+static void rintls_release_decoded_peer_chain(x509_cert_t* certificates,
+                                              u32 count)
+{
+    if (!certificates) return;
+    for (u32 index = 0u; index < count; ++index)
+        x509_cert_clear(&certificates[index]);
+    rintls_secure_zero(certificates,
+                       (rin_size_t)count * sizeof(*certificates));
+    rintls_mem_free(certificates);
+}
+
+static int rintls_verify_chain_top(void* opaque, const x509_cert_t* chain_top,
+                                   const u8* encoded_chain,
+                                   rin_size_t encoded_chain_len,
+                                   u32 chain_count)
 {
     rintls_ctx* ctx = (rintls_ctx*)opaque;
+    x509_cert_t* chain = RIN_NULL;
+    int trusted = 0;
     if (!ctx || !chain_top) return 0;
-
-    if (rintls_verify_against_anchors(ctx->trust_anchors, chain_top,
-                                      ctx->trusted_unix_time))
-        return 1;
-    if (ctx->shared_trust_store &&
-        rintls_verify_against_anchors(ctx->shared_trust_store->trust_anchors,
-                                      chain_top,
-                                      ctx->trusted_unix_time)) {
-        return 1;
+    /* Mozilla's Websites trust bit is for authenticating TLS servers.  It
+     * must never implicitly authorize a TLS client's certificate. */
+    if (ctx->handshake.is_server ||
+        !rintls_decode_peer_chain(encoded_chain, encoded_chain_len,
+                                  chain_count, &chain)) {
+        return 0;
     }
-    return 0;
+
+    if (ctx->shared_trust_store)
+        trusted = rintls_verify_against_anchors(
+            ctx->shared_trust_store->trust_anchors, chain_top, chain,
+            chain_count, ctx->trusted_unix_time,
+            ctx->shared_trust_store->policy_reviewed_at,
+            ctx->shared_trust_store->policy_expires_at);
+    rintls_release_decoded_peer_chain(chain, chain_count);
+    return trusted;
 }
 
 static u32 rintls_read_le32(const u8* bytes)
@@ -567,6 +705,11 @@ static void rintls_free_anchor_list(rintls_trust_anchor* anchor)
             rintls_secure_zero(anchor->der, anchor->der_len);
             rintls_mem_free(anchor->der);
         }
+        if (anchor->name_constraints_der) {
+            rintls_secure_zero(anchor->name_constraints_der,
+                               anchor->name_constraints_len);
+            rintls_mem_free(anchor->name_constraints_der);
+        }
         rintls_secure_zero(anchor, sizeof(*anchor));
         rintls_mem_free(anchor);
         anchor = next;
@@ -669,18 +812,28 @@ int rintls_add_trust_anchor_der(rintls_ctx* ctx,
                                 const void* certificate_der,
                                 rin_size_t certificate_len)
 {
-    int result;
-    if (!ctx || ctx->handshake_started) return RINTLS_ERR_CERTIFICATE;
-    if (rintls_trust_anchor_count(ctx) >= RINTLS_MAX_TRUST_ANCHORS)
-        return RINTLS_ERR_MEMORY;
-    result = rintls_add_anchor_to_list(&ctx->trust_anchors,
-                                       &ctx->trust_anchor_count,
-                                       certificate_der, certificate_len);
-    if (result != RINTLS_OK) return result;
-    tls_handshake_set_trust_anchor_verifier(&ctx->handshake,
-                                             rintls_verify_chain_top,
-                                             ctx);
-    return RINTLS_OK;
+    (void)ctx;
+    (void)certificate_der;
+    (void)certificate_len;
+    /* A DER certificate alone carries neither Mozilla trust purpose nor its
+     * out-of-band root constraints. Use an RCA1 bundle with a bound RCP1
+     * policy table instead of creating an unscoped trust anchor. */
+    return RINTLS_ERR_CERTIFICATE;
+}
+
+static rintls_trust_anchor* rintls_find_anchor_by_sha256(
+    rintls_trust_anchor* anchors, const u8* digest)
+{
+    for (; anchors; anchors = anchors->next) {
+        u8 actual[32];
+        sha256(anchors->der, anchors->der_len, actual);
+        if (rintls_memcmp(actual, digest, sizeof(actual)) == 0) {
+            rintls_secure_zero(actual, sizeof(actual));
+            return anchors;
+        }
+        rintls_secure_zero(actual, sizeof(actual));
+    }
+    return RIN_NULL;
 }
 
 int rintls_trust_store_from_bundle(const void* bundle,
@@ -726,7 +879,76 @@ int rintls_trust_store_from_bundle(const void* bundle,
         }
         offset += der_len;
     }
+    if (offset > bundle_len ||
+        bundle_len - offset < RINTLS_TRUST_POLICY_HEADER_BYTES ||
+        bytes[offset] != 'R' || bytes[offset + 1u] != 'C' ||
+        bytes[offset + 2u] != 'P' || bytes[offset + 3u] != '1')
+        goto invalid;
+    {
+        u32 policy_count = rintls_read_le32(bytes + offset + 4u);
+        store->policy_reviewed_at = rintls_read_le64(bytes + offset + 8u);
+        store->policy_expires_at = rintls_read_le64(bytes + offset + 16u);
+        offset += RINTLS_TRUST_POLICY_HEADER_BYTES;
+        if (policy_count != count || store->policy_reviewed_at == 0u ||
+            store->policy_expires_at <= store->policy_reviewed_at ||
+            store->policy_expires_at > 253402300799ULL)
+            goto invalid;
+        for (u32 index = 0u; index < policy_count; ++index) {
+            const u8* digest;
+            u8 flags;
+            u16 name_constraints_len;
+            u64 server_distrust_after;
+            u64 email_distrust_after;
+            rintls_trust_anchor* anchor;
+            if (offset > bundle_len ||
+                bundle_len - offset < RINTLS_TRUST_POLICY_RECORD_BYTES)
+                goto invalid;
+            digest = bytes + offset;
+            flags = bytes[offset + 32u];
+            name_constraints_len = rintls_read_le16(bytes + offset + 34u);
+            server_distrust_after = rintls_read_le64(bytes + offset + 36u);
+            email_distrust_after = rintls_read_le64(bytes + offset + 44u);
+            if ((flags & ~(RINTLS_TRUST_POLICY_WEBSITES |
+                           RINTLS_TRUST_POLICY_EMAIL)) != 0u ||
+                bytes[offset + 33u] != 0u ||
+                name_constraints_len > 4096u ||
+                name_constraints_len >
+                    bundle_len - offset - RINTLS_TRUST_POLICY_RECORD_BYTES ||
+                server_distrust_after > 253402300799ULL ||
+                email_distrust_after > 253402300799ULL)
+                goto invalid;
+            anchor = rintls_find_anchor_by_sha256(store->trust_anchors,
+                                                  digest);
+            if (!anchor || anchor->policy_present) goto invalid;
+            if (name_constraints_len != 0u) {
+                const u8* constraints = bytes + offset +
+                    RINTLS_TRUST_POLICY_RECORD_BYTES;
+                if (x509_validate_name_constraints(
+                        constraints, name_constraints_len) != X509_OK)
+                    goto invalid;
+                anchor->name_constraints_der =
+                    (u8*)rintls_malloc(name_constraints_len);
+                if (!anchor->name_constraints_der) {
+                    failure = RINTLS_ERR_MEMORY;
+                    goto invalid;
+                }
+                rintls_memcpy(anchor->name_constraints_der, constraints,
+                              name_constraints_len);
+                anchor->name_constraints_len = name_constraints_len;
+            }
+            anchor->trust_flags = flags;
+            anchor->server_distrust_after = server_distrust_after;
+            anchor->email_distrust_after = email_distrust_after;
+            anchor->policy_present = 1u;
+            offset += RINTLS_TRUST_POLICY_RECORD_BYTES +
+                      name_constraints_len;
+        }
+    }
     if (offset != bundle_len) goto invalid;
+    for (rintls_trust_anchor* anchor = store->trust_anchors; anchor;
+         anchor = anchor->next) {
+        if (!anchor->policy_present) goto invalid;
+    }
     *store_out = store;
     return RINTLS_OK;
 

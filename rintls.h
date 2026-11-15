@@ -398,13 +398,15 @@ int rintls_get_client_certificate_request(
 /* Whether the application has answered the client-certificate request. */
 int rintls_client_certificate_configured(const rintls_ctx* ctx);
 
-/* Add one DER-encoded CA certificate to this context's trust store. */
+/* Compatibility entry point. It rejects certificate-only input because a
+ * trust anchor must carry fingerprint-bound purpose, review and constraint
+ * policy from an RCP1 record. */
 int rintls_add_trust_anchor_der(rintls_ctx* ctx,
                                 const void* certificate_der,
                                 rin_size_t certificate_len);
 
-/* Load a Rin CA bundle: "RCA1", little-endian entry count, followed by
- * repeated little-endian DER length + DER certificate records. */
+/* Load an RCA1 bundle with a mandatory fingerprint-bound RCP1 trust-policy
+ * table. Certificate-only RCA1 input is rejected. */
 int rintls_load_trust_store(rintls_ctx* ctx,
                             const void* bundle,
                             rin_size_t bundle_len);

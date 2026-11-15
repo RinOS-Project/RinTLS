@@ -3513,9 +3513,16 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
         cert_index++;
     }
 
+    if (chain_err == TLS_HS_ERR_OK)
+        write_u32_le(ctx->peer_certificate_chain,
+                     ctx->peer_certificate_chain_count);
+
     if (chain_err == TLS_HS_ERR_OK && !ctx->verify_none) {
         if (!prev || !ctx->trust_anchor_verify ||
-            ctx->trust_anchor_verify(ctx->trust_anchor_opaque, prev) != 1) {
+            ctx->trust_anchor_verify(ctx->trust_anchor_opaque, prev,
+                                     ctx->peer_certificate_chain,
+                                     ctx->peer_certificate_chain_len,
+                                     ctx->peer_certificate_chain_count) != 1) {
             rintls_debug("[TLS] Certificate chain has no trusted Rin anchor\n");
             chain_err = TLS_HS_ERR_TRUST;
         }
@@ -3526,9 +3533,6 @@ int tls_recv_certificate(tls_handshake_ctx_t* ctx)
         ctx->state = TLS_STATE_ERROR;
         return chain_err;
     }
-
-    write_u32_le(ctx->peer_certificate_chain,
-                 ctx->peer_certificate_chain_count);
 
     if (ctx->is_server && !ctx->is_tls13) {
         ctx->server_tls12_client_certificate_received = 1;
